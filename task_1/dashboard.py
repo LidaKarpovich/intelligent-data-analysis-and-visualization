@@ -98,12 +98,12 @@ def view_hist(d: pd.DataFrame, crit: str) -> dict:
     return dict(fig_hist=ch.fig_histogram(sub), ins_hist=ins.histogram(d, sub, crit))
 
 
-def view_qq(d: pd.DataFrame, log: bool) -> dict:
-    fig, r2, n = ch.fig_qq(d, log)
+def view_qq(store: dd.Store, f: dd.Filters, log: bool) -> dict:
+    counts = dd.hourly_counts(store, f)
+    fig, r2, n = ch.fig_qq(counts, log)
     if not np.isfinite(r2):
         return dict(fig_qq=fig, ins_qq="")
-    x = d.set_index("created").resample("h").size().to_numpy(float)
-    return dict(fig_qq=fig, ins_qq=ins.qq(x, r2, log))
+    return dict(fig_qq=fig, ins_qq=ins.qq(counts.to_numpy(float), r2, log))
 
 
 def view_kde(d: pd.DataFrame, feature: str) -> dict:
@@ -125,9 +125,10 @@ def view_sankey(d: pd.DataFrame, left: str) -> dict:
     return dict(fig_sankey=ch.fig_sankey(d, left), ins_sankey=ins.sankey(d, ch.SANKEY_LEFT[left]))
 
 
-def view_hex(d: pd.DataFrame, mode: str) -> dict:
-    fig, n = ch.fig_hexbin(d, mode)
-    return dict(fig_hex=fig, ins_hex=ins.hexbin(d, mode == ch.HEX_MODES[0], n))
+def view_hex(store: dd.Store, f: dd.Filters, d: pd.DataFrame, mode: str) -> dict:
+    hourly = None if mode == ch.HEX_MODES[0] else dd.hourly_counts(store, f)
+    fig, n = ch.fig_hexbin(d, mode, hourly)
+    return dict(fig_hex=fig, ins_hex=ins.hexbin(d, mode == ch.HEX_MODES[0], n, hourly))
 
 
 def view_flows(store: dd.Store, d: pd.DataFrame, f: dd.Filters, left: str, hexm: str) -> dict:
@@ -136,7 +137,7 @@ def view_flows(store: dd.Store, d: pd.DataFrame, f: dd.Filters, left: str, hexm:
                ins_wf=ins.waterfall(prev, cur, n_days, f.period not in store.period_dates),
                fig_bubble=ch.fig_bubble(d), ins_bubble=ins.bubble(d) if not d.empty else "")
     out.update(view_sankey(d, left))
-    out.update(view_hex(d, hexm))
+    out.update(view_hex(store, f, d, hexm))
     return out
 
 
@@ -147,7 +148,7 @@ def compute_all(store: dd.Store, f: dd.Filters, ctl: dict) -> dict:
     out.update(view_overview(d))
     out.update(view_compare(d))
     out.update(view_hist(d, ctl["hist_crit"]))
-    out.update(view_qq(d, ctl["qq_log"]))
+    out.update(view_qq(store, f, ctl["qq_log"]))
     out.update(view_kde(d, ctl["kde_feature"]))
     out.update(view_violin(d, ctl["violin_by"]))
     out.update(view_rain(d))
@@ -192,7 +193,7 @@ def on_hist(state, var_name, value):
 
 
 def on_qq(state, var_name, value):
-    _assign(state, view_qq(_d(state), state.qq_log))
+    _assign(state, view_qq(STORE, _filters(state), state.qq_log))
 
 
 def on_kde(state, var_name, value):
@@ -208,7 +209,7 @@ def on_sankey(state, var_name, value):
 
 
 def on_hex(state, var_name, value):
-    _assign(state, view_hex(_d(state), state.hex_mode))
+    _assign(state, view_hex(STORE, _filters(state), _d(state), state.hex_mode))
 
 
 def on_init(state):

@@ -107,8 +107,11 @@ def load() -> "Store":
     cal["Дата"] = pd.to_datetime(cal["Дата"]).dt.tz_localize(None).dt.normalize()
     feats["day_type"] = feats["date"].map(cal.set_index("Дата")["Тип дня"]).fillna(1).astype("int8")
 
+    feats = feats.sort_values("created", kind="stable")
     top_src = pd.read_parquet(AGG / "agg_top_src.parquet")
-    return Store(feats=feats, period_dates=period_dates, top_src=top_src)
+    # Календарь целиком, а не только даты, где уже есть карточки: пустой день нужного типа — ноль, не пропуск
+    return Store(feats=feats, period_dates=period_dates, top_src=top_src,
+                 day_type_by_date=cal.set_index("Дата")["Тип дня"])
 
 
 @dataclass
@@ -116,6 +119,7 @@ class Store:
     feats: pd.DataFrame
     period_dates: dict
     top_src: pd.DataFrame
+    day_type_by_date: pd.Series = field(default_factory=lambda: pd.Series(dtype="float"))
 
 
 @dataclass
@@ -139,6 +143,50 @@ def apply_filters(store: Store, f: Filters) -> pd.DataFrame:
     if crit and len(crit) < len(CRIT_ORDER):
         m &= d["crit"].isin(crit).to_numpy()
     return d[m]
+
+
+def scope_dates(store: Store, f: Filters) -> pd.DatetimeIndex:
+    """Даты, которые проходят фильтр периода и типа дня.
+
+    Источник и критичность дату не выкидывают: час без таких карточек — настоящий ноль.
+    Даты без записи в календаре при выбранном типе дня не входят (их тип неизвестен).
+    """
+    if f.period in store.period_dates:
+        dates = pd.DatetimeIndex(sorted(pd.to_datetime(list(store.period_dates[f.period])))).normalize()
+    else:
+        raw = pd.DatetimeIndex(pd.unique(store.feats["date"])).sort_values()
+        if len(raw) == 0:
+            return raw
+        dates = pd.date_range(raw.min(), raw.max(), freq="D")
+    if f.day_type not in DAY_TYPE_CODES:
+        return pd.DatetimeIndex(dates)
+    codes = DAY_TYPE_CODES[f.day_type]
+    by_date = store.day_type_by_date
+    keep = []
+    for dt in dates:
+        code = by_date.get(pd.Timestamp(dt), pd.NA)
+        if pd.isna(code) or int(code) not in codes:
+            continue
+        keep.append(pd.Timestamp(dt))
+    return pd.DatetimeIndex(keep)
+
+
+def hourly_counts(store: Store, f: Filters) -> pd.Series:
+    """Карточки по часам только для дат из scope_dates.
+
+    Часы другого типа дня не заполняются нулём. Час нужного типа без карточек — ноль.
+    """
+    dates = scope_dates(store, f)
+    if len(dates) == 0:
+        return pd.Series(dtype=float)
+    index = pd.DatetimeIndex(np.concatenate([
+        pd.date_range(pd.Timestamp(day), periods=24, freq="h").to_numpy() for day in dates
+    ]))
+    d = apply_filters(store, f)
+    if d.empty:
+        return pd.Series(0, index=index, dtype=float)
+    counts = d["created"].dt.floor("h").value_counts()
+    return counts.reindex(index, fill_value=0).astype(float).sort_index()
 
 
 def previous_window(store: Store, f: Filters) -> tuple[pd.DataFrame, pd.DataFrame, int]:

@@ -272,16 +272,14 @@ def fig_histogram(d: pd.DataFrame, col: str = "react_min") -> go.Figure:
     return base(fig, 360, margin=dict(l=8, r=16, t=28, b=8), bargap=0)
 
 
-def _hourly_counts(d: pd.DataFrame) -> np.ndarray:
-    s = d.set_index("created").resample("h").size()
-    return s.to_numpy(float)
+def fig_qq(counts: pd.Series, log: bool = False) -> tuple[go.Figure, float, int]:
+    """QQ-график: число карточек в час против нормального закона.
 
-
-def fig_qq(d: pd.DataFrame, log: bool = False) -> tuple[go.Figure, float, int]:
-    """QQ-график: число карточек в час против нормального закона."""
-    if d.empty:
+    counts — ряд только по часам, которые разрешает фильтр периода и типа дня.
+    """
+    if counts is None or len(counts) == 0:
         return empty(), float("nan"), 0
-    x = _hourly_counts(d)
+    x = counts.to_numpy(float)
     if len(x) < 20:
         return empty("Меньше 20 часовых интервалов — выберите больший период"), float("nan"), len(x)
     if log:
@@ -547,8 +545,8 @@ def _hexbin(x: np.ndarray, y: np.ndarray, xr, yr, nx: int = 40, aspect: float = 
 HEX_MODES = ["Время взятия в работу × время решения", "Час суток × карточек за этот час"]
 
 
-def fig_hexbin(d: pd.DataFrame, mode: str) -> tuple[go.Figure, int]:
-    if d.empty:
+def fig_hexbin(d: pd.DataFrame, mode: str, hourly: pd.Series | None = None) -> tuple[go.Figure, int]:
+    if d.empty and mode == HEX_MODES[0]:
         return empty(), 0
     if mode == HEX_MODES[0]:
         t = d[["react_min", "solve_min"]].dropna()
@@ -557,7 +555,9 @@ def fig_hexbin(d: pd.DataFrame, mode: str) -> tuple[go.Figure, int]:
         xr, yr = (-2, 5.5), (-2, 5.5)
         xt, yt = "Время взятия в работу (лог. шкала)", "Время решения (лог. шкала)"
     else:
-        s = d.set_index("created").resample("h").size()
+        if hourly is None or len(hourly) == 0:
+            return empty(), 0
+        s = hourly.sort_index()
         x = s.index.hour.to_numpy(float) + np.random.default_rng(RNG_SEED).uniform(-0.5, 0.5, len(s))
         y = s.to_numpy(float)
         xr, yr = (-0.5, 23.5), (0, max(10.0, float(np.quantile(y, 0.995)) * 1.05))

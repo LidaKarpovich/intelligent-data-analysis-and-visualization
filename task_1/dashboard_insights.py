@@ -429,7 +429,7 @@ def waterfall(prev: pd.DataFrame, cur: pd.DataFrame, n_days: int, whole_period: 
     return txt
 
 
-def hexbin(d: pd.DataFrame, mode_first: bool, n: int) -> str:
+def hexbin(d: pd.DataFrame, mode_first: bool, n: int, hourly: pd.Series | None = None) -> str:
     if mode_first:
         t = d[["react_min", "solve_min"]].dropna()
         t = t[(t["react_min"] >= dd.INSTANT_MIN) & (t["solve_min"] >= dd.INSTANT_MIN)]
@@ -445,7 +445,7 @@ def hexbin(d: pd.DataFrame, mode_first: bool, n: int) -> str:
                 + (": долгое ожидание в очереди не означает долгого разбора." if abs(rho) < 0.3 else
                    ": карточки, которые долго ждут, обычно и разбираются дольше.")
                 + f" Самая плотная сота — взятие ≈ {dd.fmt_minutes(x)}, решение ≈ {dd.fmt_minutes(y)}.")
-    s = d.set_index("created").resample("h").size()
+    s = hourly if hourly is not None else pd.Series(dtype=float)
     if len(s) < 100:
         return ""
     by_h = s.groupby(s.index.hour)
