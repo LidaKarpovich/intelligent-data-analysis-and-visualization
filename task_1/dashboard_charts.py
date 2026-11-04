@@ -1,13 +1,14 @@
 """
-dashboard_charts.py — Plotly-фигуры дашборда (данные -> go.Figure). Без ML.
+dashboard_charts.py — Plotly-фигуры дашборда (данные -> go.Figure).
 
-Оформление по «Чек-листу очистки графика» (занятие 2.2):
+Общие правила оформления:
   * без 3D, теней и рамок; сетка — редкая, бледная, только по оси значений;
-  * нейтральная серая база + один фокусный цвет; смысловые цвета исходов сохранены
-    (синий — False Positive, оранжевый — реальный инцидент) и одинаковы на всех графиках;
-  * подписи осей с единицами измерения; прямые подписи вместо легенды, где серий мало;
-  * заголовок и вывод — в карточке страницы над графиком (заголовок Plotly не дублируем).
-Палитры проверены валидатором CVD (дальтонизм): синий/оранжевый, порядковая синяя шкала.
+  * нейтральная серая база + один фокусный цвет; цвета исходов одинаковы на всех графиках
+    (синий — False Positive, оранжевый — реальный инцидент);
+  * подписи осей с единицами измерения; прямые подписи значений там, где серий мало;
+  * заголовок и вывод — в карточке страницы над графиком (заголовок Plotly не дублируется);
+  * подписи на графике не должны перекрывать друг друга и данные.
+Палитры проверены на различимость при дальтонизме.
 """
 from __future__ import annotations
 
@@ -88,7 +89,7 @@ def _short(s: str, n: int = 38) -> str:
 
 # ================================================================ 1. ОБЗОР
 def fig_daily(d: pd.DataFrame) -> go.Figure:
-    """Линейный график: «Сравнение → изменение во времени»."""
+    """Поток карточек по дням и скользящее среднее за 7 дней."""
     if d.empty:
         return empty()
     s = d.groupby("date").size()
@@ -116,8 +117,12 @@ def _grain(d: pd.DataFrame) -> tuple[str, str]:
     return "M", "%m.%Y"
 
 
+def grain_label(d: pd.DataFrame) -> str:
+    return {"D": "дням", "W": "неделям", "M": "месяцам"}[_grain(d)[0]]
+
+
 def fig_class_mix(d: pd.DataFrame) -> go.Figure:
-    """100%-ная столбчатая с накоплением: «Состав → изменение состава во времени»."""
+    """Доли исходов карточек по интервалам (100-процентная столбчатая с накоплением)."""
     if d.empty:
         return empty()
     freq, fmt = _grain(d)
@@ -135,11 +140,11 @@ def fig_class_mix(d: pd.DataFrame) -> go.Figure:
     fig.update_layout(barmode="stack", bargap=0.15, legend=dict(traceorder="normal"))
     fig.update_yaxes(tickformat=".0%", range=[0, 1], title_text="Доля карточек")
     fig.update_xaxes(type="category", tickangle=0, nticks=14)
-    return base(fig, 340, legend=True, margin=dict(l=8, r=16, t=40, b=8))
+    return base(fig, 360, legend=True, margin=dict(l=8, r=16, t=56, b=8))
 
 
 def fig_verdicts(d: pd.DataFrame) -> go.Figure:
-    """Столбцы долей: «Состав → простые доли» (по методичке: «состав вердиктов — доли»)."""
+    """Доли вердиктов (столбцы долей; круговая не подходит — 7 категорий, есть очень малые)."""
     if d.empty:
         return empty()
     vc = d["verdict_txt"].value_counts()
@@ -156,12 +161,12 @@ def fig_verdicts(d: pd.DataFrame) -> go.Figure:
         hovertemplate="%{y}: %{x:.1%}<extra></extra>"))
     fig.update_xaxes(visible=False, range=[0, sh.max() * 1.45])
     fig.update_yaxes(showgrid=False, tickfont=dict(color=INK_2, size=12), ticklabelstandoff=6)
-    return base(fig, 340, bargap=0.35)
+    return base(fig, 360, bargap=0.35)
 
 
 # ================================================================ 2. СРАВНЕНИЕ
 def fig_top_rules(d: pd.DataFrame, k: int = 10) -> go.Figure:
-    """Линейчатая (горизонтальная) диаграмма: «Сравнение → ранжирование». Один цвет — длина несёт смысл."""
+    """Топ правил по числу карточек: один цвет — сравнивается длина."""
     if d.empty:
         return empty()
     vc = d["rule"].value_counts().head(k)[::-1]
@@ -176,8 +181,7 @@ def fig_top_rules(d: pd.DataFrame, k: int = 10) -> go.Figure:
 
 
 def fig_fp_deviation(d: pd.DataFrame, min_n: int = 100) -> go.Figure:
-    """Дивергентная столбчатая: «Сравнение → отклонение от нормы».
-    Отклонение доли False Positive категории IRP от средней доли FP (в процентных пунктах)."""
+    """Отклонение доли False Positive категории IRP от средней доли FP (в процентных пунктах)."""
     if d.empty:
         return empty()
     g = d.groupby("irp").agg(n=("cls", "size"), fp=("cls", lambda s: (s == dd.CLS_FP).mean()))
@@ -198,12 +202,12 @@ def fig_fp_deviation(d: pd.DataFrame, min_n: int = 100) -> go.Figure:
     fig.add_vline(x=0, line=dict(color=INK_2, width=1))
     fig.update_xaxes(range=[-lim, lim], title_text=f"Отклонение от средней доли FP ({dd.fmt_pct(avg)}), п.п.",
                      zeroline=False, showgrid=True, gridcolor=GRID)
-    fig.update_yaxes(showgrid=False, tickfont=dict(color=INK_2, size=12))
+    fig.update_yaxes(showgrid=False, tickfont=dict(color=INK_2, size=12), ticklabelstandoff=6)
     return base(fig, 380, bargap=0.3)
 
 
 def fig_heatmap_hour(d: pd.DataFrame) -> go.Figure:
-    """Тепловая карта: «Связь → большой объём данных». Среднее число карточек в час по дням недели."""
+    """Среднее число карточек в час по дням недели."""
     if d.empty:
         return empty()
     cnt = pd.crosstab(d["dow"], d["hour"]).reindex(index=range(7), columns=range(24), fill_value=0)
@@ -221,7 +225,7 @@ def fig_heatmap_hour(d: pd.DataFrame) -> go.Figure:
 
 
 def rules_table(d: pd.DataFrame, k: int = 15) -> pd.DataFrame:
-    """Табличное представление (доступность: цифры, а не только цвет)."""
+    """Табличное представление: точные цифры, а не только цвет и длина."""
     cols = ["Правило корреляции", "Карточек", "Доля FP, %", "Доля «Решён», %", "Медиана взятия в работу, мин"]
     if d.empty:
         return pd.DataFrame(columns=cols)
@@ -233,9 +237,9 @@ def rules_table(d: pd.DataFrame, k: int = 15) -> pd.DataFrame:
     return g.round({"Доля FP, %": 1, "Доля «Решён», %": 1, "Медиана взятия в работу, мин": 1})
 
 
-# ================================================================ 3. РАСПРЕДЕЛЕНИЯ (EDA, раздел 4)
+# ================================================================ 3. РАСПРЕДЕЛЕНИЯ
 def fig_histogram(d: pd.DataFrame, col: str = "react_min") -> go.Figure:
-    """4.1 Гистограмма: форма распределения, асимметрия, «хвосты». Бины равной ширины в log10(мин)."""
+    """Гистограмма времени: форма распределения и хвосты. Бины равной ширины в log10(мин)."""
     lv = dd.log_minutes(d[col]) if not d.empty else np.array([])
     if len(lv) < 10:
         return empty("Меньше 10 значений — гистограмма не информативна")
@@ -248,14 +252,21 @@ def fig_histogram(d: pd.DataFrame, col: str = "react_min") -> go.Figure:
     # медиана и 90-й процентиль — по ВСЕМ значениям (вместе с «мгновенными»), как в подписи над графиком
     allv = pd.to_numeric(d[col], errors="coerce").dropna()
     med, p90 = allv.median(), allv.quantile(0.9)
-    for m, lab, side in [(med, "медиана", "right"), (p90, "90 % быстрее", "left")]:
-        if m < dd.INSTANT_MIN:
-            continue
+    marks = [(m, lab) for m, lab in [(med, "медиана"), (p90, "90 % быстрее")] if m >= dd.INSTANT_MIN]
+    close = len(marks) == 2 and np.log10(marks[1][0]) - np.log10(marks[0][0]) < 1.6
+    for i, (m, lab) in enumerate(marks):
         x = np.log10(m)
+        # медиана подписывается слева от линии, процентиль — справа; у краёв оси — внутрь графика
+        side = "right" if i == 0 else "left"
+        if side == "right" and x < -0.6:
+            side = "left"
+        if side == "left" and x > 4.6:
+            side = "right"
         fig.add_vline(x=x, line=dict(color=INK_2, width=1.2))
         fig.add_annotation(x=x, y=1, yref="paper", yanchor="bottom", text=f"{lab}: {dd.fmt_minutes(m)}",
                            showarrow=False, xanchor=side, xshift=-4 if side == "right" else 4,
-                           font=dict(size=11, color=INK))
+                           yshift=-18 if (close and i == 1 and side == "right") else 0,
+                           bgcolor="rgba(255,255,255,0.85)", font=dict(size=11, color=INK))
     fig.update_xaxes(title_text="Время взятия в работу (логарифмическая шкала)", range=[-2.1, 6], **TIME_TICKS)
     fig.update_yaxes(title_text="Карточек", tickformat=",d")
     return base(fig, 360, margin=dict(l=8, r=16, t=28, b=8), bargap=0)
@@ -267,7 +278,7 @@ def _hourly_counts(d: pd.DataFrame) -> np.ndarray:
 
 
 def fig_qq(d: pd.DataFrame, log: bool = False) -> tuple[go.Figure, float, int]:
-    """4.2 QQ Plot: интенсивность поступления алертов (карточек в час) против нормального закона."""
+    """QQ-график: число карточек в час против нормального закона."""
     if d.empty:
         return empty(), float("nan"), 0
     x = _hourly_counts(d)
@@ -300,7 +311,7 @@ _LEN_TICKS = dict(tickvals=[0, 1, 2, 3, 4, 5], ticktext=["1", "10", "100", "1 т
 
 
 def fig_kde(d: pd.DataFrame, feature_label: str) -> tuple[go.Figure, dict]:
-    """4.3 KDE: сглаженная плотность признака у реальных инцидентов и у False Positive."""
+    """Сглаженная плотность (KDE) признака у реальных инцидентов и у False Positive."""
     col, is_log = KDE_FEATURES[feature_label]
     rng = np.random.default_rng(RNG_SEED)
     fig, ns, curves = go.Figure(), {}, []
@@ -337,19 +348,20 @@ def fig_kde(d: pd.DataFrame, feature_label: str) -> tuple[go.Figure, dict]:
 VIOLIN_GROUPS = ["Критичность", "Источник инцидента", "Пиктограмма IRP (топ-6)"]
 
 
+def violin_groups(d: pd.DataFrame, by: str) -> tuple[str, list]:
+    if by == "Критичность":
+        return "crit", list(dd.CRIT_ORDER)
+    if by == "Источник инцидента":
+        return "source_grp", dd.SOURCES[1:]
+    return "irp", list(d["irp"].value_counts().head(6).index)
+
+
 def fig_violin(d: pd.DataFrame, by: str) -> go.Figure:
-    """4.4 Violin = KDE + box plot: время взятия в работу по группам."""
+    """Violin (плотность + ящик с усами): время взятия в работу по группам."""
     if d.empty:
         return empty()
-    if by == "Критичность":
-        col, groups = "crit", [c for c in dd.CRIT_ORDER]
-        color = lambda g: CRIT_COLORS[g]
-    elif by == "Источник инцидента":
-        col, groups = "source_grp", dd.SOURCES[1:]
-        color = lambda g: BLUE
-    else:
-        col, groups = "irp", list(d["irp"].value_counts().head(6).index)
-        color = lambda g: BLUE
+    col, groups = violin_groups(d, by)
+    color = (lambda g: CRIT_COLORS[g]) if col == "crit" else (lambda g: BLUE)
     rng = np.random.default_rng(RNG_SEED)
     fig, shown = go.Figure(), 0
     for g in groups:
@@ -369,12 +381,12 @@ def fig_violin(d: pd.DataFrame, by: str) -> go.Figure:
         return empty("В группах меньше 30 значений")
     fig.update_xaxes(title_text="Время взятия в работу (логарифмическая шкала)", range=[-2.1, 6], **TIME_TICKS,
                      showgrid=True, gridcolor=GRID)
-    fig.update_yaxes(showgrid=False, tickfont=dict(color=INK_2), autorange="reversed")
+    fig.update_yaxes(showgrid=False, tickfont=dict(color=INK_2), autorange="reversed", ticklabelstandoff=6)
     return base(fig, 380, violinmode="overlay", violingap=0.1)
 
 
 def fig_raincloud(d: pd.DataFrame, n_points: int = 400) -> go.Figure:
-    """4.5 Raincloud: облако (KDE) сверху, зонтик (box) на оси, дождь (сырые точки) снизу — время решения."""
+    """Raincloud: облако (плотность) сверху, ящик на оси, сырые точки снизу — время решения по группам."""
     if d.empty:
         return empty()
     rng = np.random.default_rng(RNG_SEED)
@@ -403,13 +415,14 @@ def fig_raincloud(d: pd.DataFrame, n_points: int = 400) -> go.Figure:
     return base(fig, 380, violingap=0, violinmode="overlay")
 
 
-# ================================================================ 4. СОСТАВ, ПОТОКИ, ПЛОТНОСТЬ (разделы 2 и 6)
+# ================================================================ 4. ПОТОКИ И ПЛОТНОСТЬ
 SANKEY_LEFT = {"Пиктограмма IRP": "irp", "Критичность": "crit", "Источник инцидента": "source_grp",
                "Правило корреляции (топ-8)": "rule"}
 
 
-def fig_sankey(d: pd.DataFrame, left_label: str) -> go.Figure:
-    """6.2 Sankey: объёмы связей категория → вердикт (статический срез; время не обязательно)."""
+def fig_sankey(d: pd.DataFrame, left_label: str, height: int = 460) -> go.Figure:
+    """Sankey: сколько карточек каждой категории получили каждый вердикт.
+    Узлы расставлены вручную, а подписи вынесены за пределы лент, чтобы текст не лежал поверх потоков."""
     if d.empty:
         return empty()
     col = SANKEY_LEFT[left_label]
@@ -426,10 +439,27 @@ def fig_sankey(d: pd.DataFrame, left_label: str) -> go.Figure:
             order.remove("Прочие")
             order.append("Прочие")
         t = t.loc[order]
-    lnames, rnames = list(t.index), dd.CLASS_ORDER
-    ltot, rtot = t.sum(axis=1), t.sum(axis=0)
-    labels = [f"{_short(n, 34)}  {dd.fmt_int(ltot[n])}" for n in lnames] + \
-             [f"{n}  {dd.fmt_int(rtot[n])}" for n in rnames]
+    t = t.loc[t.sum(axis=1) > 0]
+    rtot = t.sum(axis=0)
+    rnames = [c for c in dd.CLASS_ORDER if rtot[c] > 0]
+    lnames, ltot, total = list(t.index), t.sum(axis=1), float(t.values.sum())
+
+    # --- геометрия узлов в пикселях (как считает plotly: общий масштаб по самому плотному столбцу)
+    H, pad = height - 16, 14
+    ky = (H - (max(len(lnames), len(rnames)) - 1) * pad) / total
+    def centers(vals, spread):
+        h = np.array(vals, float) * ky
+        gap = (H - h.sum()) / (len(h) - 1) if (spread and len(h) > 1) else pad
+        y, out = 0.0, []
+        for hi in h:
+            out.append(y + hi / 2)
+            y += hi + gap
+        return [c / H for c in out]
+    ly, ry = centers(ltot[lnames], True), centers(rtot[rnames], True)
+    node_x = [0.001] * len(lnames) + [0.999] * len(rnames)
+    node_y = [min(max(v, 0.001), 0.999) for v in ly + ry]
+
+    labels = [f"{n}: {dd.fmt_int(ltot[n])}" for n in lnames] + [f"{n}: {dd.fmt_int(rtot[n])}" for n in rnames]
     node_colors = [GRAY] * len(lnames) + [CLASS_COLORS[n] for n in rnames]
     src, tgt, val, lcol = [], [], [], []
     for i, ln in enumerate(lnames):
@@ -439,19 +469,34 @@ def fig_sankey(d: pd.DataFrame, left_label: str) -> go.Figure:
                 src.append(i)
                 tgt.append(len(lnames) + j)
                 val.append(v)
-                lcol.append(_rgba(CLASS_COLORS[rn], 0.38))
+                lcol.append(_rgba(CLASS_COLORS[rn], 0.35))
+    # Ленты в центре, по бокам — место под подписи. Ширина полей считается по самой длинной подписи
+    # (≈ 6,4 px на символ при 11 px, график не уже ≈ 560 px), чтобы текст не обрезался и не ложился на ленты.
+    lab_l = [f"{_short(n, 26)}  {dd.fmt_int(ltot[n])}" for n in lnames]
+    lab_r = [max(n.split(" (")[0], "(" + n.split(" (")[1] if " (" in n else "", key=len) + f"  {dd.fmt_int(rtot[n])}"
+             for n in rnames]
+    X0 = min(0.42, (max(map(len, lab_l)) * 6.4 + 12) / 560)
+    X1 = max(0.62, 1 - (max(map(len, lab_r)) * 6.4 + 12) / 560)
     fig = go.Figure(go.Sankey(
-        arrangement="snap", valueformat=",d",
-        node=dict(label=labels, color=node_colors, pad=14, thickness=14, line=dict(width=0),
-                  hovertemplate="%{label}<extra></extra>"),
+        arrangement="fixed", valueformat=",d", domain=dict(x=[X0, X1], y=[0, 1]),
+        # встроенные подписи пустые (они легли бы поверх лент) — ниже свои подписи снаружи
+        node=dict(label=[""] * len(labels), customdata=labels, x=node_x, y=node_y, color=node_colors, pad=pad,
+                  thickness=12, line=dict(width=0), hovertemplate="%{customdata}<extra></extra>"),
         link=dict(source=src, target=tgt, value=val, color=lcol,
-                  hovertemplate="%{source.label} → %{target.label}<br>%{value:,} карточек<extra></extra>")))
-    fig.update_layout(font=dict(size=12, color=INK))
-    return base(fig, 440, margin=dict(l=8, r=8, t=8, b=8))
+                  customdata=[f"{labels[a].split(':')[0]} → {labels[b].split(':')[0]}" for a, b in zip(src, tgt)],
+                  hovertemplate="%{customdata}<br>%{value:,} карточек<extra></extra>")))
+    for n, y in zip(lnames, ly):
+        fig.add_annotation(x=X0 - 0.006, y=1 - y, xref="paper", yref="paper", xanchor="right", showarrow=False,
+                           text=f"{_short(n, 26)}  <b>{dd.fmt_int(ltot[n])}</b>", font=dict(size=11, color=INK_2))
+    for n, y in zip(rnames, ry):
+        fig.add_annotation(x=X1 + 0.006, y=1 - y, xref="paper", yref="paper", xanchor="left", showarrow=False,
+                           align="left", text=f"{n.replace(' (', '<br>(')}  <b>{dd.fmt_int(rtot[n])}</b>",
+                           font=dict(size=11, color=INK_2))
+    return base(fig, height, margin=dict(l=4, r=4, t=8, b=8))
 
 
 def fig_waterfall(prev: pd.DataFrame, cur: pd.DataFrame, n_days: int, top: int = 7) -> go.Figure:
-    """Waterfall: «Состав / итог → вклады / изменения». Как изменился поток карточек и за счёт каких категорий IRP."""
+    """Waterfall: как изменился поток карточек и за счёт каких категорий IRP."""
     if prev.empty and cur.empty:
         return empty()
     a = prev["irp"].value_counts()
@@ -459,7 +504,7 @@ def fig_waterfall(prev: pd.DataFrame, cur: pd.DataFrame, n_days: int, top: int =
     delta = b.reindex(a.index.union(b.index), fill_value=0) - a.reindex(a.index.union(b.index), fill_value=0)
     delta = delta.reindex(delta.abs().sort_values(ascending=False).index)
     head, rest = delta.head(top), delta.iloc[top:].sum()
-    names = [f"Предыдущие {n_days} дн."] + [_short(n, 26) for n in head.index] + \
+    names = [f"Предыдущие {n_days} дн."] + [_short(n, 22) for n in head.index] + \
             (["Прочие категории"] if len(delta) > top else []) + [f"Текущие {n_days} дн."]
     vals = [len(prev)] + head.tolist() + ([rest] if len(delta) > top else []) + [len(cur)]
     meas = ["absolute"] + ["relative"] * (len(vals) - 2) + ["total"]
@@ -471,15 +516,16 @@ def fig_waterfall(prev: pd.DataFrame, cur: pd.DataFrame, n_days: int, top: int =
         increasing=dict(marker=dict(color=RED)), decreasing=dict(marker=dict(color=BLUE)),
         totals=dict(marker=dict(color=GRAY)), hovertemplate="%{x}: %{text}<extra></extra>"))
     top_y = max(np.cumsum(vals[:-1]).max(), vals[0], vals[-1])
-    fig.update_yaxes(title_text="Карточек за окно", range=[0, top_y * 1.15], tickformat=",d")
-    fig.update_xaxes(tickangle=-30, tickfont=dict(color=INK_2))
-    return base(fig, 400)
+    fig.update_yaxes(title_text="Карточек за окно", range=[0, top_y * 1.18], tickformat=",d")
+    fig.update_xaxes(tickangle=-35, tickfont=dict(color=INK_2, size=11))
+    return base(fig, 460)
 
 
-# ---------- 6.1 Hexbin: шестиугольные ячейки (настоящие соты, а не прямоугольники)
-def _hexbin(x: np.ndarray, y: np.ndarray, xr, yr, nx: int = 32, aspect: float = 1.6):
+# ---------- Hexbin: шестиугольные ячейки (настоящие соты, а не прямоугольники)
+def _hexbin(x: np.ndarray, y: np.ndarray, xr, yr, nx: int = 40, aspect: float = 2.8):
     """Шестиугольное бинирование (алгоритм как в matplotlib.hexbin: две смещённые решётки).
-    aspect — отношение ширины области построения к высоте в пикселях: при нём соты выглядят правильными."""
+    aspect — отношение ширины области построения к высоте в пикселях (график во всю ширину страницы ≈ 2,8):
+    при нём соты выглядят правильными шестиугольниками."""
     sx = (xr[1] - xr[0]) / nx
     sy = np.sqrt(3) * sx * aspect * (yr[1] - yr[0]) / (xr[1] - xr[0])
     ix, iy = (x - xr[0]) / sx, (y - yr[0]) / sy
@@ -519,7 +565,7 @@ def fig_hexbin(d: pd.DataFrame, mode: str) -> tuple[go.Figure, int]:
         x, y = x[keep], y[keep]
         xt, yt = "Час суток (МСК)", "Карточек за час"
     n = len(x)
-    if n < 100:                                    # методичка: при < 100 точках лучше обычный scatter
+    if n < 100:                                    # при < 100 точках информативнее обычный scatter
         return empty("Меньше 100 точек — для такого объёма подходит обычная диаграмма рассеяния"), n
     cx, cy, cnt, hx, hy = _hexbin(x, y, xr, yr)
     # 7 классов плотности, границы — по логарифмической шкале числа точек
@@ -548,13 +594,13 @@ def fig_hexbin(d: pd.DataFrame, mode: str) -> tuple[go.Figure, int]:
         fig.update_xaxes(tickvals=list(range(0, 24, 3)), ticktext=[f"{h:02d}:00" for h in range(0, 24, 3)])
     fig.update_xaxes(range=list(xr), title_text=xt)
     fig.update_yaxes(range=list(yr), title_text=yt, showgrid=False)
-    fig.update_layout(legend=dict(title=dict(text="точек в соте:"), orientation="h", x=0, y=-0.16,
-                                  yanchor="top", traceorder="normal", itemclick=False, itemdoubleclick=False))
-    return base(fig, 440, legend=True, margin=dict(l=8, r=16, t=12, b=8)), n
+    fig.update_layout(legend=dict(title=dict(text="точек в соте:"), traceorder="normal",
+                                  itemclick=False, itemdoubleclick=False))
+    return base(fig, 460, legend=True, margin=dict(l=8, r=16, t=44, b=8)), n
 
 
 def fig_dotplot(top_src: pd.DataFrame) -> go.Figure:
-    """6.3 Dot Plot: топ-20 src по числу карточек — компактнее столбцов (выше data-ink ratio)."""
+    """Dot Plot: топ-20 src по числу карточек — компактнее столбцов."""
     d = top_src.sort_values("n_cards")
     xs, ys = [], []
     for name, v in zip(d["src"], d["n_cards"]):
@@ -574,7 +620,7 @@ def fig_dotplot(top_src: pd.DataFrame) -> go.Figure:
 
 
 def fig_bubble(d: pd.DataFrame, k: int = 20) -> go.Figure:
-    """6.4 Bubble: три переменные — X медиана времени решения, Y доля реальных инцидентов, размер — объём."""
+    """Bubble: X — медиана времени решения, Y — доля реальных инцидентов, размер — число карточек."""
     if d.empty:
         return empty()
     g = d.groupby("rule").agg(n=("cls", "size"), solve=("solve_min", "median"),
@@ -583,20 +629,42 @@ def fig_bubble(d: pd.DataFrame, k: int = 20) -> go.Figure:
     g = g[g["n"] >= 30].sort_values("n", ascending=False).head(k).dropna(subset=["solve"])
     if len(g) < 3:
         return empty("Меньше 3 правил с ≥ 30 карточками")
-    sizeref = 2.0 * g["n"].max() / (46 ** 2)
+    max_d = 46                                       # диаметр самого крупного пузырька, px
+    sizeref = 2.0 * g["n"].max() / (max_d ** 2)
     fig = go.Figure(go.Scatter(
         x=g["solve"], y=g["real"], mode="markers", customdata=np.c_[g.index, g["n"], g["crit"]],
         marker=dict(size=g["n"], sizemode="area", sizeref=sizeref, sizemin=4, color=_rgba(BLUE, 0.45),
                     line=dict(color=SURFACE, width=1.5)),
         hovertemplate="%{customdata[0]}<br>карточек: %{customdata[1]:,}<br>медиана решения: %{x:.1f} мин"
                       "<br>доля «Решён»: %{y:.1f} %<br>средняя критичность: %{customdata[2]:.1f} из 4<extra></extra>"))
-    lab = pd.concat([g.head(3), g.nlargest(2, "real"), g.nlargest(1, "solve")])
-    lab = lab[~lab.index.duplicated()]
-    for name, r in lab.iterrows():
-        fig.add_annotation(x=r["solve"], y=r["real"], text=_short(name, 30), showarrow=False, yshift=16,
-                           xanchor="left" if r["solve"] < 0.15 * g["solve"].max() else "center",
-                           font=dict(size=10, color=INK_2))
-    fig.update_xaxes(title_text="Медиана времени решения, мин", showgrid=True, gridcolor=GRID,
-                     range=[-0.06 * g["solve"].max() - 0.2, g["solve"].max() * 1.12])
-    fig.update_yaxes(title_text="Доля карточек «Решён», %", range=[-0.08 * g["real"].max() - 1, g["real"].max() * 1.15])
-    return base(fig, 440)
+    xr = [-0.06 * g["solve"].max() - 0.2, g["solve"].max() * 1.12]
+    yr = [-0.08 * g["real"].max() - 1, g["real"].max() * 1.18]
+    # Подписи: только самые важные пузырьки и только если подпись ни с чем не пересекается.
+    # Координаты переводятся в пиксели для типичной области построения ≈ 620 × 400 px.
+    W, H = 620, 400
+    to_px = lambda x, y: ((x - xr[0]) / (xr[1] - xr[0]) * W, (y - yr[0]) / (yr[1] - yr[0]) * H)
+    bubbles = [(*to_px(r["solve"], r["real"]), np.sqrt(r["n"] / sizeref) / 2) for _, r in g.iterrows()]
+    order = pd.concat([g.nlargest(2, "real"), g.head(3), g.nlargest(1, "solve"), g.nsmallest(1, "real")])
+    placed = []
+    for name in dict.fromkeys(order.index):
+        r = g.loc[name]
+        px, py = to_px(r["solve"], r["real"])
+        rad = np.sqrt(r["n"] / sizeref) / 2
+        text = _short(name, 28)
+        w, h = 6.2 * len(text), 14
+        x0 = px if px < 0.2 * W else px - w / 2 if px < 0.8 * W else px - w
+        x0 = min(max(x0, 0), W - w)
+        box = (x0, py + rad + 3, x0 + w, py + rad + 3 + h)
+        if box[3] > H or any(not (box[2] < b[0] or box[0] > b[2] or box[3] < b[1] or box[1] > b[3]) for b in placed):
+            continue
+        # подпись не должна лежать на чужих пузырьках
+        if any(bx - br < box[2] and bx + br > box[0] and by - br < box[3] and by + br > box[1]
+               for bx, by, br in bubbles if (bx, by) != (px, py)):
+            continue
+        placed.append(box)
+        fig.add_annotation(x=r["solve"], y=r["real"], text=text, showarrow=False, yshift=rad + 3 + h / 2,
+                           xanchor="left" if px < 0.2 * W else "center" if px < 0.8 * W else "right",
+                           font=dict(size=10, color=INK_2), bgcolor="rgba(255,255,255,0.8)")
+    fig.update_xaxes(title_text="Медиана времени решения, мин", showgrid=True, gridcolor=GRID, range=xr)
+    fig.update_yaxes(title_text="Доля карточек «Решён», %", range=yr)
+    return base(fig, 480)

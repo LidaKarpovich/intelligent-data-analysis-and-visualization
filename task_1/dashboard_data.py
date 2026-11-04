@@ -4,7 +4,7 @@ dashboard_data.py — загрузка данных, фильтры и агре�
 Источники (все уже лежат в проекте):
     data/agg/features.parquet     — карточки после etl.py (240 295 строк)
     data/agg/agg_top_src.parquet  — топ-20 src по числу карточек (считается в etl.py)
-    data/dataframe.parquet        — «остров периодов»: Дата -> Период (7/30/90/180 дней)
+    data/dataframe.parquet        — таблица периодов: Дата -> Период (7/30/90/180 дней)
     data/calendar.parquet         — календарь: Дата -> Тип дня (рабочий / пятница / праздник / выходной)
 
 Модельные файлы (predictions, shap_sample, pdp, bias_variance) здесь НЕ используются.
@@ -97,7 +97,7 @@ def load() -> "Store":
     for col in ["rule", "inc_type", "irp", "group"]:
         feats[col] = feats[col].fillna("не указано")
 
-    # «Остров периодов» (как в треке Qlik): Дата -> Период
+    # Таблица периодов: Дата -> Период (7 / 30 / 90 / 180 дней)
     per = pd.read_parquet(DATA / "dataframe.parquet")
     per["Дата"] = pd.to_datetime(per["Дата"]).dt.tz_localize(None).dt.normalize()
     period_dates = {p: set(g["Дата"]) for p, g in per.groupby("Период")}

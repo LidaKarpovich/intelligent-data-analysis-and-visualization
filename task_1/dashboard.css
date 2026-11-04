@@ -1,5 +1,5 @@
-/* dashboard.css — оформление дашборда Taipy (чек-лист 2.2: без теней, 3D и декоративных рамок;
-   нейтральная база, один фокусный цвет; карточки отделены только тонкой границей). */
+/* dashboard.css — оформление дашборда Taipy: без теней, 3D и декоративных рамок;
+   нейтральная база, один фокусный цвет; карточки отделены только тонкой границей. */
 
 :root {
   --ink: #0b0b0b;
@@ -113,7 +113,7 @@ body {
 }
 .insight p { margin: 0; }
 .insight strong { color: var(--ink); font-weight: 650; }
-.method {
+.hint {
   display: block;
   margin-top: 6px;
   padding-top: 8px;
@@ -123,6 +123,13 @@ body {
   color: var(--muted);
 }
 .taipy-chart { width: 100%; }
+
+/* ---------- «Главное за период» ---------- */
+.summary { border-left: 4px solid var(--blue); }
+.summary-list { max-width: none; font-size: 14px; color: var(--ink); }
+.summary-list ul { margin: 6px 0 2px; padding-left: 20px; }
+.summary-list li { margin: 4px 0; line-height: 1.5; }
+.summary-list li::marker { color: var(--blue); }
 
 /* ---------- таблица ---------- */
 .rules-table { margin-top: 4px; }
