@@ -563,6 +563,10 @@ def _hexbin(x: np.ndarray, y: np.ndarray, xr, yr, nx: int = 40, aspect: float = 
 
 
 HEX_MODES = ["Время взятия в работу × время решения", "Час суток × карточек за этот час"]
+HEX_QUESTIONS = {
+    HEX_MODES[0]: "Долгое ожидание в очереди означает долгий разбор?",
+    HEX_MODES[1]: "В какие часы поток даёт всплески сильнее обычного?",
+}
 
 
 def fig_hexbin(d: pd.DataFrame, mode: str, hourly: pd.Series | None = None) -> tuple[go.Figure, int]:
@@ -643,7 +647,7 @@ def fig_bubble(d: pd.DataFrame, k: int = 20) -> go.Figure:
     """Bubble: X — медиана времени решения, Y — доля реальных инцидентов, размер — число карточек."""
     if d.empty:
         return empty()
-    g = d.groupby("rule").agg(n=("cls", "size"), solve=("solve_min", "median"),
+    g = d.groupby("rule").agg(n=("cls", "size"), solve=("solve_min", lambda s: dd.plotted_minutes(s).median()),
                               real=("cls", lambda s: (s == dd.CLS_REAL).mean() * 100),
                               crit=("crit_ord", "mean"))
     g = g[g["n"] >= 30].sort_values("n", ascending=False).head(k).dropna(subset=["solve"])
@@ -657,12 +661,26 @@ def fig_bubble(d: pd.DataFrame, k: int = 20) -> go.Figure:
                     line=dict(color=SURFACE, width=1.5)),
         hovertemplate="%{customdata[0]}<br>карточек: %{customdata[1]:,}<br>медиана решения: %{x:.1f} мин"
                       "<br>доля «Решён»: %{y:.1f} %<br>средняя критичность: %{customdata[2]:.1f} из 4<extra></extra>"))
-    xr = [-0.06 * g["solve"].max() - 0.2, g["solve"].max() * 1.12]
+    positive = g["solve"][g["solve"] >= dd.INSTANT_MIN]
+    use_log = len(positive) == len(g) and float(positive.max() / positive.min()) >= 10
+    if use_log:
+        xr = [float(positive.min()) / 1.4, float(positive.max()) * 1.4]
+        # У оси type=log диапазон задаётся степенями десяти, не самими минутами.
+        axis_range = [float(np.log10(xr[0])), float(np.log10(xr[1]))]
+    else:
+        xr = [-0.06 * g["solve"].max() - 0.2, g["solve"].max() * 1.12]
+        axis_range = xr
     yr = [-0.08 * g["real"].max() - 1, g["real"].max() * 1.18]
     # Подписи: только самые важные пузырьки и только если подпись ни с чем не пересекается.
     # Координаты переводятся в пиксели для типичной области построения ≈ 620 × 400 px.
     W, H = 620, 400
-    to_px = lambda x, y: ((x - xr[0]) / (xr[1] - xr[0]) * W, (y - yr[0]) / (yr[1] - yr[0]) * H)
+
+    def to_px(x, y):
+        if use_log:
+            px = (np.log10(x) - np.log10(xr[0])) / (np.log10(xr[1]) - np.log10(xr[0])) * W
+        else:
+            px = (x - xr[0]) / (xr[1] - xr[0]) * W
+        return px, (y - yr[0]) / (yr[1] - yr[0]) * H
     bubbles = [(*to_px(r["solve"], r["real"]), np.sqrt(r["n"] / sizeref) / 2) for _, r in g.iterrows()]
     order = pd.concat([g.nlargest(2, "real"), g.head(3), g.nlargest(1, "solve"), g.nsmallest(1, "real")])
     placed = []
@@ -685,6 +703,7 @@ def fig_bubble(d: pd.DataFrame, k: int = 20) -> go.Figure:
         fig.add_annotation(x=r["solve"], y=r["real"], text=text, showarrow=False, yshift=rad + 3 + h / 2,
                            xanchor="left" if px < 0.2 * W else "center" if px < 0.8 * W else "right",
                            font=dict(size=10, color=INK_2), bgcolor="rgba(255,255,255,0.8)")
-    fig.update_xaxes(title_text="Медиана времени решения, мин", showgrid=True, gridcolor=GRID, range=xr)
+    fig.update_xaxes(title_text="Медиана времени решения, мин", showgrid=True, gridcolor=GRID, range=axis_range,
+                     type="log" if use_log else "linear")
     fig.update_yaxes(title_text="Доля карточек «Решён», %", range=yr)
     return base(fig, 480)

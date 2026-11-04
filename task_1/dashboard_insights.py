@@ -516,7 +516,7 @@ def dotplot(top_src: pd.DataFrame) -> str:
 
 
 def bubble(d: pd.DataFrame) -> str:
-    g = d.groupby("rule").agg(n=("cls", "size"), solve=("solve_min", "median"),
+    g = d.groupby("rule").agg(n=("cls", "size"), solve=("solve_min", lambda s: dd.plotted_minutes(s).median()),
                               real=("cls", lambda s: (s == dd.CLS_REAL).mean()))
     g = g[g["n"] >= 30].sort_values("n", ascending=False).head(20).dropna()
     if len(g) < 3:

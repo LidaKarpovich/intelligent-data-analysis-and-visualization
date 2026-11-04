@@ -6,8 +6,6 @@ dashboard_data.py — загрузка данных, фильтры и агре�
     data/agg/agg_top_src.parquet  — топ-20 src по числу карточек (считается в etl.py)
     data/dataframe.parquet        — таблица периодов: Дата -> Период (7/30/90/180 дней)
     data/calendar.parquet         — календарь: Дата -> Тип дня (рабочий / пятница / праздник / выходной)
-
-Модельные файлы (predictions, shap_sample, pdp, bias_variance) здесь НЕ используются.
 """
 from __future__ import annotations
 

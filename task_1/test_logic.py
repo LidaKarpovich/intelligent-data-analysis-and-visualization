@@ -1,6 +1,7 @@
 """Синтетические проверки логики дашборда. Не требуют parquet и не запускают Taipy."""
 import unittest
 from datetime import datetime
+from pathlib import Path
 
 import pandas as pd
 
@@ -93,6 +94,38 @@ class CalendarDayTypeInsightTest(unittest.TestCase):
         rows = [(datetime(2024, 1, 1, 11), 3, "MaxPatrol SIEM", "Высокая") for _ in range(5)]
         text = ins.heatmap(_cards(rows))
         self.assertNotIn("рабочие часы", text)
+
+
+class ChartQuestionTest(unittest.TestCase):
+    def test_titles_ask_a_soc_question(self):
+        page = Path("dashboard.py").read_text(encoding="utf-8")
+        self.assertNotIn("Плотность вместо диаграммы рассеяния", page)
+        self.assertIn("Какой вердикт получает карточка?", page)
+        self.assertIn("Какие адреса-источники порождают больше всего карточек?", page)
+        self.assertEqual(
+            ch.HEX_QUESTIONS[ch.HEX_MODES[1]],
+            "В какие часы поток даёт всплески сильнее обычного?",
+        )
+
+    def test_bubble_log_scale_when_durations_span_orders(self):
+        rows = []
+        for rule, solve in (("slow", 100.0), ("mid", 10.0), ("fast", 1.0)):
+            for _ in range(30):
+                rows.append({"rule": rule, "cls": dd.CLS_FP, "solve_min": solve, "crit_ord": 2})
+        fig = ch.fig_bubble(pd.DataFrame(rows))
+        self.assertEqual(fig.layout.xaxis.type, "log")
+        lo, hi = fig.layout.xaxis.range
+        self.assertLess(lo, 0)
+        self.assertGreater(hi, 2)
+
+    def test_bubble_ignores_instant_closes_when_placing_rules(self):
+        rows = [{"rule": "auto", "cls": dd.CLS_FP, "solve_min": 0.0, "crit_ord": 1} for _ in range(40)]
+        rows += [{"rule": "auto", "cls": dd.CLS_FP, "solve_min": 1.0, "crit_ord": 1} for _ in range(20)]
+        rows += [{"rule": "mid", "cls": dd.CLS_FP, "solve_min": 10.0, "crit_ord": 1} for _ in range(30)]
+        rows += [{"rule": "slow", "cls": dd.CLS_FP, "solve_min": 100.0, "crit_ord": 1} for _ in range(30)]
+        fig = ch.fig_bubble(pd.DataFrame(rows))
+        self.assertEqual(fig.layout.xaxis.type, "log")
+        self.assertGreater(fig.layout.xaxis.range[0], -2)
 
 
 class EmptySankeyTest(unittest.TestCase):

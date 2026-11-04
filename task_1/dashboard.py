@@ -130,7 +130,8 @@ def view_sankey(d: pd.DataFrame, left: str) -> dict:
 def view_hex(store: dd.Store, f: dd.Filters, d: pd.DataFrame, mode: str) -> dict:
     hourly = None if mode == ch.HEX_MODES[0] else dd.hourly_counts(store, f)
     fig, n = ch.fig_hexbin(d, mode, hourly)
-    return dict(fig_hex=fig, ins_hex=ins.hexbin(d, mode == ch.HEX_MODES[0], n, hourly))
+    return dict(fig_hex=fig, ins_hex=ins.hexbin(d, mode == ch.HEX_MODES[0], n, hourly),
+                hex_title=ch.HEX_QUESTIONS[mode])
 
 
 def view_flows(store: dd.Store, d: pd.DataFrame, f: dd.Filters, left: str, hexm: str) -> dict:
@@ -296,7 +297,7 @@ overview_page = """
 <|Каждый столбец — 100 % карточек интервала. Сравнивайте высоту оранжевого и синего сегментов.|text|class_name=hint|>
 |>
 <|part|class_name=card|
-<|Состав вердиктов|text|class_name=card-title|>
+<|Какой вердикт получает карточка?|text|class_name=card-title|>
 <|{ins_verdicts}|text|mode=md|class_name=insight|>
 <|chart|figure={fig_verdicts}|plot_config={PLOT_CONFIG}|height=360px|>
 <|Доля от всех карточек за период и число карточек.|text|class_name=hint|>
@@ -328,7 +329,7 @@ compare_page = """
 |>
 
 <|part|class_name=card|
-<|Топ-15 правил: объём, исход и скорость реакции|text|class_name=card-title|>
+<|У каких правил объём, исход и скорость реакции не совпадают?|text|class_name=card-title|>
 <|Точные значения по самым массовым правилам: сортировка по столбцам и выгрузка в CSV.|text|class_name=insight|>
 <|{rules_tbl}|table|show_all|downloadable|class_name=rules-table|>
 |>
@@ -372,7 +373,7 @@ eda_page = """
 <|layout|columns=1 1|gap=16px|
 <|part|class_name=card|
 <|layout|columns=1 auto|class_name=card-head|
-<|Время взятия в работу по группам|text|class_name=card-title|>
+<|Какие группы ждут взятия в работу дольше?|text|class_name=card-title|>
 
 <|{violin_by}|selector|lov={VIOLIN_LOV}|dropdown|label=Группировка|on_change=on_violin|>
 |>
@@ -381,7 +382,7 @@ eda_page = """
 <|Ширина контура — сколько карточек с таким временем; шкала логарифмическая.|text|class_name=hint|>
 |>
 <|part|class_name=card|
-<|Время решения: L1, L2 и ГИБ|text|class_name=card-title|>
+<|Насколько дольше живёт карточка после эскалации на L2?|text|class_name=card-title|>
 <|{ins_rain}|text|mode=md|class_name=insight|>
 <|chart|figure={fig_rain}|plot_config={PLOT_CONFIG}|height=380px|>
 <|Облако — плотность, ящик — медиана и квартили, точки — до 400 случайных карточек группы.|text|class_name=hint|>
@@ -411,7 +412,7 @@ flows_page = """
 
 <|part|class_name=card|
 <|layout|columns=1 auto|class_name=card-head|
-<|Плотность вместо диаграммы рассеяния|text|class_name=card-title|>
+<|{hex_title}|text|class_name=card-title|>
 
 <|{hex_mode}|selector|lov={HEX_LOV}|dropdown|label=Оси|on_change=on_hex|>
 |>
@@ -422,13 +423,13 @@ flows_page = """
 
 <|layout|columns=2 3|gap=16px|
 <|part|class_name=card|
-<|Топ-20 адресов-источников (src)|text|class_name=card-title|>
+<|Какие адреса-источники порождают больше всего карточек?|text|class_name=card-title|>
 <|{ins_dot}|text|mode=md|class_name=insight|>
 <|chart|figure={fig_dot}|plot_config={PLOT_CONFIG}|height=520px|>
 <|Число карточек, в которых встречается адрес-источник.|text|class_name=hint|>
 |>
 <|part|class_name=card|
-<|Правила: скорость решения и доля реальных инцидентов|text|class_name=card-title|>
+<|Какие правила долго разбирают и при этом находят реальные инциденты?|text|class_name=card-title|>
 <|{ins_bubble}|text|mode=md|class_name=insight|>
 <|chart|figure={fig_bubble}|plot_config={PLOT_CONFIG}|height=480px|>
 <|X — медиана времени решения, Y — доля карточек «Решён», размер — число карточек. Средняя критичность правила — в подсказке.|text|class_name=hint|>
