@@ -95,6 +95,14 @@ class CalendarDayTypeInsightTest(unittest.TestCase):
         self.assertNotIn("рабочие часы", text)
 
 
+class EmptyCriticalityTest(unittest.TestCase):
+    def test_cleared_criticality_returns_no_cards(self):
+        frame = _cards([(datetime(2024, 1, 1, 10), 1, "MaxPatrol SIEM", "Высокая")])
+        store = _store(frame, {pd.Timestamp("2024-01-01"): 1})
+        self.assertEqual(len(dd.apply_filters(store, dd.Filters(crit=[]))), 0)
+        self.assertEqual(len(dd.apply_filters(store, dd.Filters())), 1)
+
+
 class PlottedMedianTest(unittest.TestCase):
     def test_violin_text_uses_the_median_on_the_chart(self):
         rows = []

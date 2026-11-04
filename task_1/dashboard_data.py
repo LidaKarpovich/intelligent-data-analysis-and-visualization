@@ -148,7 +148,9 @@ def apply_filters(store: Store, f: Filters) -> pd.DataFrame:
     if f.source != ALL:
         m &= (d["source_grp"] == f.source).to_numpy()
     crit = [c for c in (f.crit or []) if c in CRIT_ORDER]
-    if crit and len(crit) < len(CRIT_ORDER):
+    if not crit:
+        return d.iloc[0:0]
+    if len(crit) < len(CRIT_ORDER):
         m &= d["crit"].isin(crit).to_numpy()
     return d[m]
 
