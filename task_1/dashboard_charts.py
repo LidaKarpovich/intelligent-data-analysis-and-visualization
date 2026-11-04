@@ -88,12 +88,21 @@ def _short(s: str, n: int = 38) -> str:
 
 
 # ================================================================ 1. ОБЗОР
-def fig_daily(d: pd.DataFrame) -> go.Figure:
+def _daily_series(d: pd.DataFrame, dates: pd.DatetimeIndex | None) -> pd.Series:
+    """Карточки по дням. dates — календарь фильтра: день без карточек остаётся нулём."""
+    s = d.groupby("date").size() if not d.empty else pd.Series(dtype=float)
+    if dates is not None and len(dates):
+        return s.reindex(pd.DatetimeIndex(dates), fill_value=0)
+    if s.empty:
+        return s
+    return s.reindex(pd.date_range(s.index.min(), s.index.max(), freq="D"), fill_value=0)
+
+
+def fig_daily(d: pd.DataFrame, dates: pd.DatetimeIndex | None = None) -> go.Figure:
     """Поток карточек по дням и скользящее среднее за 7 дней."""
-    if d.empty:
+    s = _daily_series(d, dates)
+    if s.empty:
         return empty()
-    s = d.groupby("date").size()
-    s = s.reindex(pd.date_range(s.index.min(), s.index.max(), freq="D"), fill_value=0)
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=s.index, y=s.values, mode="lines", name="за день",
                              line=dict(color=GRAY_LIGHT, width=1.5),
@@ -206,12 +215,21 @@ def fig_fp_deviation(d: pd.DataFrame, min_n: int = 100) -> go.Figure:
     return base(fig, 380, bargap=0.3)
 
 
-def fig_heatmap_hour(d: pd.DataFrame) -> go.Figure:
-    """Среднее число карточек в час по дням недели."""
-    if d.empty:
+def fig_heatmap_hour(d: pd.DataFrame, dates: pd.DatetimeIndex | None = None) -> go.Figure:
+    """Среднее число карточек в час по дням недели.
+
+    Знаменатель — все даты фильтра этого дня недели, включая дни без карточек.
+    """
+    if d.empty and (dates is None or len(dates) == 0):
         return empty()
-    cnt = pd.crosstab(d["dow"], d["hour"]).reindex(index=range(7), columns=range(24), fill_value=0)
-    n_days = d.groupby("dow")["date"].nunique().reindex(range(7)).replace(0, np.nan)
+    dow = d["dow"] if not d.empty else pd.Series(dtype=int)
+    hour = d["hour"] if not d.empty else pd.Series(dtype=int)
+    cnt = pd.crosstab(dow, hour).reindex(index=range(7), columns=range(24), fill_value=0)
+    if dates is not None and len(dates):
+        n_days = pd.Series(pd.DatetimeIndex(dates).dayofweek).value_counts().reindex(range(7), fill_value=0)
+        n_days = n_days.replace(0, np.nan)
+    else:
+        n_days = d.groupby("dow")["date"].nunique().reindex(range(7)).replace(0, np.nan) if not d.empty else pd.Series(np.nan, index=range(7))
     z = cnt.div(n_days, axis=0)
     fig = go.Figure(go.Heatmap(
         z=z.values, x=[f"{h:02d}" for h in range(24)], y=dd.WEEKDAYS, colorscale=[[i / 7, c] for i, c in enumerate(SEQ_BLUE)],

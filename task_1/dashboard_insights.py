@@ -131,10 +131,14 @@ def summary(d: pd.DataFrame) -> str:
     return "\n".join(f"- {s}" for s in out)
 
 
-def daily(d: pd.DataFrame) -> str:
-    if d.empty:
+def daily(d: pd.DataFrame, dates: pd.DatetimeIndex | None = None) -> str:
+    if d.empty and (dates is None or len(dates) == 0):
         return ""
-    s = d.groupby("date").size()
+    s = d.groupby("date").size() if not d.empty else pd.Series(dtype=float)
+    if dates is not None and len(dates):
+        s = s.reindex(pd.DatetimeIndex(dates), fill_value=0)
+    if s.empty:
+        return ""
     wk = d[d["dow"] < 5].groupby("date").size().mean()
     we = d[d["dow"] >= 5].groupby("date").size().mean()
     txt = (f"В среднем {_b(dd.fmt_int(s.mean()))} {plural(s.mean(), CARDS)} в день, пик — {_b(dd.fmt_int(s.max()))} "

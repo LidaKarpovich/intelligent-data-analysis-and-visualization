@@ -4,7 +4,9 @@ from datetime import datetime
 
 import pandas as pd
 
+import dashboard_charts as ch
 import dashboard_data as dd
+import dashboard_insights as ins
 
 
 def _cards(rows: list[tuple]) -> pd.DataFrame:
@@ -55,6 +57,29 @@ class HourlyCountsTest(unittest.TestCase):
         self.assertEqual(counts.loc[pd.Timestamp("2024-01-06 12:00")], 2)
         self.assertEqual(counts.loc[pd.Timestamp("2024-01-07 00:00")], 0)
         self.assertNotIn(pd.Timestamp("2024-01-08 10:00"), counts.index)
+
+
+class EmptyDayAverageTest(unittest.TestCase):
+    def test_daily_mean_keeps_the_quiet_day(self):
+        rows = [
+            (datetime(2024, 1, 1, 10), 1, "MaxPatrol SIEM", "Высокая"),
+            (datetime(2024, 1, 1, 11), 1, "MaxPatrol SIEM", "Высокая"),
+            (datetime(2024, 1, 3, 10), 1, "MaxPatrol SIEM", "Высокая"),
+            (datetime(2024, 1, 3, 11), 1, "MaxPatrol SIEM", "Высокая"),
+        ]
+        text = ins.daily(_cards(rows), pd.date_range("2024-01-01", "2024-01-03"))
+        # 4 карточки на 3 дня, включая пустой 2 января → 1, а не 2
+        self.assertIn("В среднем **1**", text)
+
+    def test_heatmap_denominator_includes_a_monday_with_no_cards(self):
+        rows = [
+            (datetime(2024, 1, 1, 10), 1, "MaxPatrol SIEM", "Высокая"),
+            (datetime(2024, 1, 15, 10), 1, "MaxPatrol SIEM", "Высокая"),
+        ]
+        dates = pd.date_range("2024-01-01", "2024-01-15")
+        fig = ch.fig_heatmap_hour(_cards(rows), dates)
+        # Понедельники 1, 8 и 15 января; карточки только в 10:00 двух из них → 2/3
+        self.assertAlmostEqual(float(fig.data[0].z[0][10]), 2 / 3)
 
 
 if __name__ == "__main__":

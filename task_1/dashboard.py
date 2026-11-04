@@ -77,15 +77,17 @@ def view_header(d: pd.DataFrame, f: dd.Filters) -> dict:
     )
 
 
-def view_overview(d: pd.DataFrame) -> dict:
-    return dict(fig_daily=ch.fig_daily(d), fig_mix=ch.fig_class_mix(d), fig_verdicts=ch.fig_verdicts(d),
-                ins_summary=ins.summary(d), ins_daily=ins.daily(d),
+def view_overview(store: dd.Store, f: dd.Filters, d: pd.DataFrame) -> dict:
+    dates = dd.scope_dates(store, f)
+    return dict(fig_daily=ch.fig_daily(d, dates), fig_mix=ch.fig_class_mix(d), fig_verdicts=ch.fig_verdicts(d),
+                ins_summary=ins.summary(d), ins_daily=ins.daily(d, dates),
                 ins_mix=ins.mix(d, ch.grain_label(d)) if not d.empty else "", ins_verdicts=ins.verdicts(d))
 
 
-def view_compare(d: pd.DataFrame) -> dict:
+def view_compare(store: dd.Store, f: dd.Filters, d: pd.DataFrame) -> dict:
+    dates = dd.scope_dates(store, f)
     out = dict(fig_top_rules=ch.fig_top_rules(d), fig_fp_dev=ch.fig_fp_deviation(d),
-               fig_heat=ch.fig_heatmap_hour(d), rules_tbl=ch.rules_table(d))
+               fig_heat=ch.fig_heatmap_hour(d, dates), rules_tbl=ch.rules_table(d))
     if d.empty:
         out.update(ins_top="", ins_dev="", ins_heat="")
     else:
@@ -145,8 +147,8 @@ def compute_all(store: dd.Store, f: dd.Filters, ctl: dict) -> dict:
     d = dd.apply_filters(store, f)
     out = {}
     out.update(view_header(d, f))
-    out.update(view_overview(d))
-    out.update(view_compare(d))
+    out.update(view_overview(store, f, d))
+    out.update(view_compare(store, f, d))
     out.update(view_hist(d, ctl["hist_crit"]))
     out.update(view_qq(store, f, ctl["qq_log"]))
     out.update(view_kde(d, ctl["kde_feature"]))
