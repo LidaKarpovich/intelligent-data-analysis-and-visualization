@@ -65,24 +65,47 @@ def _short(s, n: int = 48) -> str:
     return s if len(s) <= n else s[: n - 1] + "…"
 
 
-def _trend(d: pd.DataFrame) -> tuple[float, float] | None:
+def _trend(d: pd.DataFrame, dates: pd.DatetimeIndex | None = None) -> tuple[float, float] | None:
     """Средний поток в день: первая и последняя четверть периода (нужно ≥ 8 дней)."""
-    s = d.groupby("date").size()
+    s = d.groupby("date").size() if not d.empty else pd.Series(dtype=float)
+    if dates is not None and len(dates):
+        s = s.reindex(pd.DatetimeIndex(dates), fill_value=0)
+    elif len(s):
+        s = s.reindex(pd.date_range(s.index.min(), s.index.max(), freq="D"), fill_value=0)
     if len(s) < 8:
         return None
-    s = s.reindex(pd.date_range(s.index.min(), s.index.max(), freq="D"), fill_value=0)
     q = max(len(s) // 4, 2)
     return float(s.iloc[:q].mean()), float(s.iloc[-q:].mean())
 
 
+def _work_mask(day_type: pd.Series) -> pd.Series:
+    return day_type.isin(list(dd.DAY_TYPE_CODES["Рабочие"]))
+
+
+def _off_mask(day_type: pd.Series) -> pd.Series:
+    return day_type.isin(list(dd.DAY_TYPE_CODES["Выходные и праздники"]))
+
+
+def _work_off_means(d: pd.DataFrame, daily_counts: pd.Series, dates, day_types: pd.Series | None):
+    """Среднее карточек в календарный рабочий день и в выходной/праздник, включая тихие дни."""
+    if day_types is None or dates is None or len(dates) == 0 or d.empty:
+        return np.nan, np.nan
+    types = pd.Series({pd.Timestamp(t): day_types.get(pd.Timestamp(t), pd.NA) for t in pd.DatetimeIndex(dates)})
+    work_idx = types.index[_work_mask(types)]
+    off_idx = types.index[_off_mask(types)]
+    wk = daily_counts.reindex(work_idx, fill_value=0).mean() if len(work_idx) else np.nan
+    we = daily_counts.reindex(off_idx, fill_value=0).mean() if len(off_idx) else np.nan
+    return wk, we
+
+
 # ================================================================ Обзор
-def summary(d: pd.DataFrame) -> str:
+def summary(d: pd.DataFrame, dates: pd.DatetimeIndex | None = None) -> str:
     """Главное за период — 5 тезисов для руководителя SOC."""
     if d.empty:
         return "Нет карточек для выбранных фильтров."
     out = []
-    days = d["date"].nunique()
-    tr = _trend(d)
+    days = len(dates) if dates is not None and len(dates) else d["date"].nunique()
+    tr = _trend(d, dates)
     line = f"Поток: {_n(len(d), CARDS, True)} за {dd.fmt_int(days)} дн., в среднем {dd.fmt_int(len(d) / days)} в день"
     if tr and tr[0] > 0:
         a, b = tr
@@ -131,7 +154,8 @@ def summary(d: pd.DataFrame) -> str:
     return "\n".join(f"- {s}" for s in out)
 
 
-def daily(d: pd.DataFrame, dates: pd.DatetimeIndex | None = None) -> str:
+def daily(d: pd.DataFrame, dates: pd.DatetimeIndex | None = None,
+          day_types: pd.Series | None = None) -> str:
     if d.empty and (dates is None or len(dates) == 0):
         return ""
     s = d.groupby("date").size() if not d.empty else pd.Series(dtype=float)
@@ -139,8 +163,7 @@ def daily(d: pd.DataFrame, dates: pd.DatetimeIndex | None = None) -> str:
         s = s.reindex(pd.DatetimeIndex(dates), fill_value=0)
     if s.empty:
         return ""
-    wk = d[d["dow"] < 5].groupby("date").size().mean()
-    we = d[d["dow"] >= 5].groupby("date").size().mean()
+    wk, we = _work_off_means(d, s, dates, day_types)
     txt = (f"В среднем {_b(dd.fmt_int(s.mean()))} {plural(s.mean(), CARDS)} в день, пик — {_b(dd.fmt_int(s.max()))} "
            f"({dd.fmt_date(s.idxmax())}, {_ratio(s.max(), s.mean())} выше среднего).")
     if np.isfinite(wk) and np.isfinite(we) and we > 0:
@@ -175,7 +198,7 @@ def mix(d: pd.DataFrame, freq_label: str) -> str:
     if len(bad):
         txt += (f" В {len(bad)} {plural(len(bad), ('интервале', 'интервалах', 'интервалах'))} больше 20 % карточек без вердикта (максимум "
                 f"{dd.fmt_pct(bad.max())}, {bad.idxmax().strftime(fmt)}): там доли FP и инцидентов занижены.")
-    wk, we = d[d["dow"] < 5], d[d["dow"] >= 5]
+    wk, we = d[_work_mask(d["day_type"])], d[_off_mask(d["day_type"])]
     if len(wk) >= 100 and len(we) >= 100:
         rk, re_ = _share(wk, dd.CLS_REAL), _share(we, dd.CLS_REAL)
         if abs(re_ - rk) >= 0.05:
@@ -240,12 +263,13 @@ def heatmap(d: pd.DataFrame) -> str:
         return ""
     t = pd.crosstab(d["dow"], d["hour"])
     i, j = np.unravel_index(np.argmax(t.values), t.shape)
-    work = (d["dow"] < 5) & d["hour"].between(9, 17)
+    work_day = _work_mask(d["day_type"])
+    work = work_day & d["hour"].between(9, 17)
     night = d["hour"].between(0, 5).mean()
     txt = (f"Пик нагрузки — {_b(f'{dd.WEEKDAYS[t.index[i]]}, {t.columns[j]:02d}:00')}. "
            f"В рабочие часы будней (09–18) поступает {_b(dd.fmt_pct(work.mean()))} карточек, "
            f"ночью (00–06) — {dd.fmt_pct(night)}.")
-    if (d["dow"] < 5).mean() < 0.05:              # выбраны только выходные
+    if work_day.mean() < 0.05:                    # праздник в понедельник — не будний день
         return (f"Пик нагрузки — {_b(f'{dd.WEEKDAYS[t.index[i]]}, {t.columns[j]:02d}:00')}; "
                 f"ночью (00–06) поступает {dd.fmt_pct(night)} карточек.")
     txt += (" Поток привязан к рабочему дню пользователей — дневную смену L1 стоит усиливать, "

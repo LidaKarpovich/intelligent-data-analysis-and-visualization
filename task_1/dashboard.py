@@ -80,7 +80,7 @@ def view_header(d: pd.DataFrame, f: dd.Filters) -> dict:
 def view_overview(store: dd.Store, f: dd.Filters, d: pd.DataFrame) -> dict:
     dates = dd.scope_dates(store, f)
     return dict(fig_daily=ch.fig_daily(d, dates), fig_mix=ch.fig_class_mix(d), fig_verdicts=ch.fig_verdicts(d),
-                ins_summary=ins.summary(d), ins_daily=ins.daily(d, dates),
+                ins_summary=ins.summary(d, dates), ins_daily=ins.daily(d, dates, store.day_type_by_date),
                 ins_mix=ins.mix(d, ch.grain_label(d)) if not d.empty else "", ins_verdicts=ins.verdicts(d))
 
 

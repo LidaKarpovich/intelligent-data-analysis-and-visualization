@@ -77,6 +77,24 @@ class CalendarGapTest(unittest.TestCase):
         self.assertEqual(len(dd.scope_dates(store, dd.Filters(day_type="Все дни"))), 1)
 
 
+class CalendarDayTypeInsightTest(unittest.TestCase):
+    def test_holiday_monday_is_not_called_a_workday(self):
+        rows = [
+            (datetime(2024, 1, 1, 11), 3, "MaxPatrol SIEM", "Высокая"),
+            *[(datetime(2024, 1, 2, 11), 1, "MaxPatrol SIEM", "Высокая") for _ in range(9)],
+        ]
+        dates = pd.to_datetime(["2024-01-01", "2024-01-02"])
+        types = pd.Series({pd.Timestamp("2024-01-01"): 3, pd.Timestamp("2024-01-02"): 1})
+        text = ins.daily(_cards(rows), dates, types)
+        self.assertIn("По будням", text)
+        self.assertIn("9", text)
+
+    def test_heatmap_does_not_call_a_holiday_office_hours(self):
+        rows = [(datetime(2024, 1, 1, 11), 3, "MaxPatrol SIEM", "Высокая") for _ in range(5)]
+        text = ins.heatmap(_cards(rows))
+        self.assertNotIn("рабочие часы", text)
+
+
 class EmptyDayAverageTest(unittest.TestCase):
     def test_daily_mean_keeps_the_quiet_day(self):
         rows = [
