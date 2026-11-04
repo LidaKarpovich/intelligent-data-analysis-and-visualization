@@ -1,6 +1,6 @@
 # Дашборд Taipy «SOC · триаж алертов SIEM»
 
-Интерактивный дашборд по карточкам инцидентов `iavd_incidents_raw`: поток алертов, исходы карточек, скорость реакции, распределения и потоки «категория → вердикт». Под каждым графиком — аналитический вывод с цифрами, который пересчитывается по фильтрам. ML-модель в дашборде не используется.
+Интерактивный дашборд по карточкам инцидентов `iavd_incidents_raw`: поток алертов, исходы карточек, скорость реакции, распределения и потоки «категория → вердикт». Под каждым графиком — вопрос аналитика SOC и ответ с цифрами для текущих фильтров. Модели здесь нет: качество советника — отдельное задание.
 
 ## Файлы
 
@@ -11,8 +11,9 @@
 | `dashboard_charts.py` | функции «данные → Plotly-фигура», единый стиль и палитра |
 | `dashboard_insights.py` | аналитические выводы к графикам |
 | `dashboard.css` | оформление страниц |
+| `test_logic.py` | синтетические проверки без parquet и без запуска Taipy |
 
-Положите их в корень проекта рядом с `etl.py` и `main.py`.
+Файлы лежат в `task_1` рядом с `etl.py` и `train.py`. Отдельного `main.py` нет. Пути к данным считаются от этой папки, поэтому команды ниже запускаются из неё.
 
 ## Данные
 
@@ -25,16 +26,19 @@ data/calendar.parquet          # календарь с типом дня
 
 ## Запуск
 
-Нужен Python 3.12 (для Python 3.13 на PyPI нет свежего Taipy):
+Нужен Python 3.12: свежий Taipy на PyPI не собран под 3.13 и 3.14.
 
 ```bash
-conda create -n idav python=3.12 -y
-conda activate idav
-pip install "taipy>=4.1" plotly "pandas<3" numpy scipy pyarrow
-python dashboard.py
+cd task_1
+uv venv .venv --python 3.12
+uv pip install --python .venv/bin/python "taipy>=4.1" plotly "pandas<3" numpy scipy pyarrow
+.venv/bin/python etl.py --full
+.venv/bin/python dashboard.py
 ```
 
-Откройте http://localhost:5002. Если `data/agg/features.parquet` ещё нет, сначала выполните `python etl.py --full`.
+Откройте http://localhost:5002. Если `data/agg/features.parquet` ещё нет, дашборд не запустится: сначала `etl.py --full`.
+
+Проверки логики без данных: `.venv/bin/python -m unittest test_logic.py`.
 
 ## Страницы
 
