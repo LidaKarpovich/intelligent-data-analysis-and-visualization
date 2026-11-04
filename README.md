@@ -4,5 +4,5 @@
 
 ## Задание 1
 
-- **Данные:** [Яндекс Диск](https://disk.yandex.ru/d/waiZmiOzun8EZA/Dataset)
+- **Данные:** [Яндекс Диск](https://disk.yandex.ru/d/waiZmiOzun8EZA/1.5%20Пр%20Декомпозиция/Dataset)
 - **Решение:** папка [`task_1`](task_1). Описание и инструкция по запуску лежат в её README.
