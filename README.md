@@ -1,4 +1,8 @@
-# intelligent-data-analysis-and-visualization
-Данные для задания 1 лежат тут: https://disk.yandex.ru/d/waiZmiOzun8EZA/Dataset
+# Интеллектуальный анализ и визуализация данных
 
-Решение задания 1 в папке task_1
+Решения заданий курса на датасете карточек инцидентов SOC (триаж алертов SIEM).
+
+## Задание 1
+
+- **Данные:** [Яндекс Диск](https://disk.yandex.ru/d/waiZmiOzun8EZA/Dataset)
+- **Решение:** папка [`task_1`](task_1). Описание и инструкция по запуску лежат в её README.
