@@ -95,6 +95,49 @@ class CalendarDayTypeInsightTest(unittest.TestCase):
         self.assertNotIn("рабочие часы", text)
 
 
+class InsightWordingTest(unittest.TestCase):
+    def test_fewer_than_ten_rules_are_not_called_ten(self):
+        frame = _cards([(datetime(2024, 1, 1, 10), 1, "MaxPatrol SIEM", "Высокая") for _ in range(3)])
+        frame["rule"] = ["a", "b", "c"]
+        text = ins.top_rules(frame)
+        self.assertIn("3 правила", text)
+        self.assertNotIn("10 правил", text)
+
+    def test_equal_critical_median_is_not_called_faster(self):
+        rows = [(datetime(2024, 1, 1, 10), 1, "MaxPatrol SIEM", "Критическая") for _ in range(30)]
+        rows += [(datetime(2024, 1, 2, 10), 1, "MaxPatrol SIEM", "Низкая") for _ in range(10)]
+        frame = _cards(rows)
+        frame["react_min"] = 10.0
+        text = ins.summary(frame)
+        self.assertIn("та же медиана", text)
+        self.assertNotIn("быстрее", text)
+
+    def test_summary_median_skips_instant_closes(self):
+        rows = [(datetime(2024, 1, 1, 10), 1, "MaxPatrol SIEM", "Критическая") for _ in range(40)]
+        rows += [(datetime(2024, 1, 2, 10), 1, "MaxPatrol SIEM", "Низкая") for _ in range(40)]
+        frame = _cards(rows)
+        frame["react_min"] = [0.0] * 25 + [30.0] * 15 + [10.0] * 40
+        text = ins.summary(frame)
+        self.assertIn("30,0", text)
+        self.assertIn("мгновенно", text)
+        self.assertNotIn("0\u00a0с", text)
+
+    def test_peak_ratio_is_times_greater_not_higher(self):
+        frame = _cards([(datetime(2024, 1, 1, 10), 1, "MaxPatrol SIEM", "Высокая")])
+        text = ins.daily(frame, pd.to_datetime(["2024-01-01"]))
+        self.assertIn("больше среднего", text)
+        self.assertNotIn("выше среднего", text)
+
+    def test_google_range_is_only_142_250_and_142_251(self):
+        src = pd.DataFrame({
+            "src": ["142.250.1.1", "142.251.2.2", "142.250.3.3", "142.252.4.4", "10.0.0.1"],
+            "n_cards": [5, 4, 3, 2, 1],
+        })
+        text = ins.dotplot(src)
+        self.assertIn("3 из подсети", text)
+        self.assertNotIn("4 из подсети", text)
+
+
 class EmptyCriticalityTest(unittest.TestCase):
     def test_cleared_criticality_returns_no_cards(self):
         frame = _cards([(datetime(2024, 1, 1, 10), 1, "MaxPatrol SIEM", "Высокая")])

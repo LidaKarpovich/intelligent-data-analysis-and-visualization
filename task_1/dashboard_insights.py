@@ -136,21 +136,31 @@ def summary(d: pd.DataFrame, dates: pd.DatetimeIndex | None = None) -> str:
         nv = d.loc[d["cls"] == dd.CLS_NONE, "rule"].value_counts()
         out.append(f"Разметка: {_b(dd.fmt_pct(none))} карточек без вердикта, "
                    f"{dd.fmt_pct(nv.iloc[0] / nv.sum())} из них — правило {_short(nv.index[0], 40)}. "
-                   "Пока они не размечены, доли FP и инцидентов оценены только по закрытым карточкам.")
+                   "Доли FP и инцидентов посчитаны по всем карточкам, поэтому неразмеченные карточки эти доли занижают.")
 
-    react = d["react_min"].dropna()
-    crit = d.loc[d["crit"] == "Критическая", "react_min"].dropna()
+    react_all = pd.to_numeric(d["react_min"], errors="coerce").dropna()
+    react = dd.plotted_minutes(react_all)
+    crit = dd.plotted_minutes(d.loc[d["crit"] == "Критическая", "react_min"])
+    # Та же медиана, что на гистограмме и скрипке: «мгновенные» закрытия не входят.
+    instant = ""
+    if len(react_all) and dd.instant_share(react_all) >= 0.001:
+        instant = (f" Доля взятых «мгновенно» (< 0,6 с) — {dd.fmt_pct(dd.instant_share(react_all))}; "
+                   "в эту медиану они не входят.")
     if len(react) and len(crit) < 30:
         out.append(f"Реакция: медиана взятия в работу {_b(_t(react.median()))}, 90 % карточек берутся быстрее "
-                   f"{_t(react.quantile(0.9))}, дольше суток ждут {dd.fmt_pct((react > 1440).mean())}.")
+                   f"{_t(react.quantile(0.9))}, дольше суток ждут {dd.fmt_pct((react > 1440).mean())}.{instant}")
     if len(react) and len(crit) >= 30:
         mc, ma = crit.median(), react.median()
-        word = "медленнее" if mc > ma else "быстрее"
-        line = f"Реакция: медиана взятия в работу {_b(_t(ma))}; критические карточки берут {word} — {_b(_t(mc))}"
-        if mc > 0 and ma > 0:
-            line += f" ({_ratio(max(mc, ma), min(mc, ma))})"
-        line += ". Критичность пока не ускоряет реакцию — её стоит учитывать в очереди." if mc > ma else "."
-        out.append(line)
+        if mc == ma:
+            line = (f"Реакция: медиана взятия в работу {_b(_t(ma))}; "
+                    "у критических карточек та же медиана.")
+        else:
+            word = "медленнее" if mc > ma else "быстрее"
+            line = f"Реакция: медиана взятия в работу {_b(_t(ma))}; критические карточки берут {word} — {_b(_t(mc))}"
+            if mc > 0 and ma > 0:
+                line += f" ({_ratio(max(mc, ma), min(mc, ma))})"
+            line += ". Критичность пока не ускоряет реакцию — её стоит учитывать в очереди." if mc > ma else "."
+        out.append(line + instant)
     return "\n".join(f"- {s}" for s in out)
 
 
@@ -165,7 +175,7 @@ def daily(d: pd.DataFrame, dates: pd.DatetimeIndex | None = None,
         return ""
     wk, we = _work_off_means(d, s, dates, day_types)
     txt = (f"В среднем {_b(dd.fmt_int(s.mean()))} {plural(s.mean(), CARDS)} в день, пик — {_b(dd.fmt_int(s.max()))} "
-           f"({dd.fmt_date(s.idxmax())}, {_ratio(s.max(), s.mean())} выше среднего).")
+           f"({dd.fmt_date(s.idxmax())}, {_ratio(s.max(), s.mean())} больше среднего).")
     if np.isfinite(wk) and np.isfinite(we) and we > 0:
         txt += f" По будням поток {_ratio(wk, we)} больше, чем в выходные ({dd.fmt_int(wk)} против {dd.fmt_int(we)})."
     spikes = (s > s.mean() + 3 * s.std()).sum()
@@ -227,7 +237,10 @@ def top_rules(d: pd.DataFrame) -> str:
     top = vc.head(10).index
     g = d[d["rule"].isin(top)].groupby("rule")["cls"].value_counts(normalize=True).unstack(fill_value=0)
     g = g.reindex(columns=dd.CLASS_ORDER, fill_value=0)
-    txt = f"10 правил из {dd.fmt_int(len(vc))} дают {_b(dd.fmt_pct(vc.head(10).sum() / len(d)))} всех карточек."
+    n_top = len(top)
+    verb = "даёт" if plural(n_top, RULES) == "правило" else "дают"
+    txt = (f"{_n(n_top, RULES).capitalize()} из {dd.fmt_int(len(vc))} {verb} "
+           f"{_b(dd.fmt_pct(vc.head(n_top).sum() / len(d)))} всех карточек.")
     noisy = g[(g[dd.CLS_REAL] < 0.01)].index
     if len(noisy):
         share = vc[noisy].sum() / len(d)
@@ -490,7 +503,8 @@ def hexbin(d: pd.DataFrame, mode_first: bool, n: int, hourly: pd.Series | None =
 def dotplot(top_src: pd.DataFrame) -> str:
     s = top_src.sort_values("n_cards", ascending=False)
     private = s["src"].str.match(r"^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)")
-    g = s["src"].str.startswith("142.25")
+    parts = s["src"].str.split(".", n=3, expand=True)
+    g = (parts[0] == "142") & parts[1].isin(["250", "251"])
     txt = (f"Лидер — {_b(s['src'].iloc[0])}: {_n(s['n_cards'].iloc[0], CARDS)}. "
            f"Внешних адресов в топе — {_b(int((~private).sum()))} из {len(s)}")
     if g.sum() >= 3:
