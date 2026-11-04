@@ -210,10 +210,16 @@ def previous_window(store: Store, f: Filters) -> tuple[pd.DataFrame, pd.DataFram
     return prev, cur, n_days
 
 
+def plotted_minutes(s: pd.Series) -> pd.Series:
+    """Те же длительности, что попадают на логарифмическую шкалу: без пропусков и «мгновенных»."""
+    v = pd.to_numeric(s, errors="coerce").dropna()
+    return v[v >= INSTANT_MIN]
+
+
 def log_minutes(s: pd.Series) -> np.ndarray:
     """Минуты -> log10; пропуски и «мгновенные» (< 0,01 мин) отбрасываем (лог-шкала их не покажет)."""
-    v = pd.to_numeric(s, errors="coerce").dropna().to_numpy(float)
-    return np.log10(v[v >= INSTANT_MIN])
+    v = plotted_minutes(s).to_numpy(float)
+    return np.log10(v)
 
 
 def instant_share(s: pd.Series) -> float:

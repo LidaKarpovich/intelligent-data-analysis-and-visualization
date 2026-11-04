@@ -268,8 +268,8 @@ def fig_histogram(d: pd.DataFrame, col: str = "react_min") -> go.Figure:
     fig = go.Figure(go.Bar(x=mid, y=h, width=0.19, marker=dict(color=BLUE, cornerradius=2), customdata=txt,
                            hovertemplate="%{customdata}: %{y:,} карточек<extra></extra>"))
     # медиана и 90-й процентиль — по ВСЕМ значениям (вместе с «мгновенными»), как в подписи над графиком
-    allv = pd.to_numeric(d[col], errors="coerce").dropna()
-    med, p90 = allv.median(), allv.quantile(0.9)
+    shown = dd.plotted_minutes(d[col])
+    med, p90 = shown.median(), shown.quantile(0.9)
     marks = [(m, lab) for m, lab in [(med, "медиана"), (p90, "90 % быстрее")] if m >= dd.INSTANT_MIN]
     close = len(marks) == 2 and np.log10(marks[1][0]) - np.log10(marks[0][0]) < 1.6
     for i, (m, lab) in enumerate(marks):

@@ -95,6 +95,26 @@ class CalendarDayTypeInsightTest(unittest.TestCase):
         self.assertNotIn("рабочие часы", text)
 
 
+class PlottedMedianTest(unittest.TestCase):
+    def test_violin_text_uses_the_median_on_the_chart(self):
+        rows = []
+        for g, slow in (("A", 30.0), ("B", 10.0)):
+            rows += [{"bucket": g, "react_min": 0.0} for _ in range(40)]
+            rows += [{"bucket": g, "react_min": slow} for _ in range(40)]
+        frame = pd.DataFrame(rows)
+        text = ins.violin(frame, "bucket", ["A", "B"])
+        self.assertIn("30,0", text)
+        self.assertIn("10,0", text)
+        self.assertNotIn("15,0", text)
+
+    def test_histogram_line_is_the_plotted_median(self):
+        frame = pd.DataFrame({"react_min": [0.0] * 20 + [30.0] * 20})
+        fig = ch.fig_histogram(frame)
+        labels = [a.text for a in fig.layout.annotations]
+        self.assertTrue(any("30,0" in t for t in labels))
+        self.assertFalse(any("15,0" in t for t in labels))
+
+
 class EmptyDayAverageTest(unittest.TestCase):
     def test_daily_mean_keeps_the_quiet_day(self):
         rows = [

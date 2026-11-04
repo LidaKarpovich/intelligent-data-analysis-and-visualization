@@ -280,7 +280,8 @@ def heatmap(d: pd.DataFrame) -> str:
 
 # ================================================================ Распределения
 def histogram(d_all: pd.DataFrame, sub: pd.DataFrame, crit: str) -> str:
-    react = sub["react_min"].dropna()
+    react_all = pd.to_numeric(sub["react_min"], errors="coerce").dropna()
+    react = dd.plotted_minutes(sub["react_min"])
     if len(react) < 10:
         who = "карточек" if crit == dd.ALL else f"карточек с критичностью «{crit}»"
         return (f"За выбранный период меньше 10 {who} с заполненным временем взятия в работу — выберите другой "
@@ -291,13 +292,13 @@ def histogram(d_all: pd.DataFrame, sub: pd.DataFrame, crit: str) -> str:
     txt += (f", но {_b(dd.fmt_pct(tail))} ждут дольше суток — длинный правый хвост: это карточки, о которых "
             "забыли в очереди." if tail >= 0.01 else "; дольше суток почти никто не ждёт.")
     if crit != dd.ALL:
-        base = d_all["react_min"].dropna()
+        base = dd.plotted_minutes(d_all["react_min"])
         if len(base) and base.median() > 0 and med > 0:
             word = "дольше" if med > base.median() else "быстрее"
             txt += (f" Это {_ratio(max(med, base.median()), min(med, base.median()))} {word}, чем по всем карточкам "
                     f"({_t(base.median())}).")
-    txt += (f" Ещё {dd.fmt_pct(dd.instant_share(react))} взяты «мгновенно» (< 0,6 с, автоматика) и на логарифмической "
-            "шкале не показаны.")
+    txt += (f" Доля взятых «мгновенно» (< 0,6 с, автоматика) — {dd.fmt_pct(dd.instant_share(react_all))}; "
+            "на логарифмической шкале они не показаны.")
     return txt
 
 
@@ -366,8 +367,8 @@ def kde(d: pd.DataFrame, col: str, is_log: bool, ns: dict) -> str:
 def violin(d: pd.DataFrame, col: str, groups: list) -> str:
     med, slow = {}, {}
     for g in groups:
-        v = d.loc[d[col] == g, "react_min"].dropna()
-        if len(dd.log_minutes(v)) >= 30:               # те же группы, что показаны на графике
+        v = dd.plotted_minutes(d.loc[d[col] == g, "react_min"])
+        if len(v) >= 30:                               # те же группы, что показаны на графике
             med[g] = v.median()
             slow[g] = (v > 1440).mean()
     if len(med) < 2:
@@ -389,13 +390,14 @@ def violin(d: pd.DataFrame, col: str, groups: list) -> str:
 def raincloud(d: pd.DataFrame) -> str:
     med, day = {}, {}
     for g in dd.GROUP_ORDER:
-        v = d.loc[d["group"] == g, "solve_min"].dropna()
+        raw = pd.to_numeric(d.loc[d["group"] == g, "solve_min"], errors="coerce").dropna()
+        v = dd.plotted_minutes(raw)
         if len(v) >= 5:
-            med[g], day[g] = v.median(), (v > 1440).mean()
+            med[g], day[g] = v.median(), (raw > 1440).mean()
     if not med:
         return ""
     txt = "Медиана времени решения: " + "; ".join(f"{g} — {_b(_t(m))}" for g, m in med.items()) + "."
-    if "L1" in med and "L2" in med and med["L1"] > 0:
+    if "L1" in med and "L2" in med and med["L1"] >= dd.INSTANT_MIN:
         txt += f" Карточка, ушедшая на L2, решается {_ratio(med['L2'], med['L1'])} дольше"
         txt += (f"; {dd.fmt_pct(day['L2'])} таких карточек живут больше суток." if day["L2"] >= 0.005 else ".")
         txt += " Эскалация — дорогой путь, поэтому важно, чтобы на L2 уходили только реальные инциденты."
