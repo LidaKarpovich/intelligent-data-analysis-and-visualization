@@ -95,6 +95,13 @@ class CalendarDayTypeInsightTest(unittest.TestCase):
         self.assertNotIn("рабочие часы", text)
 
 
+class EmptySankeyTest(unittest.TestCase):
+    def test_null_criticality_does_not_divide_by_zero(self):
+        frame = pd.DataFrame({"crit": [pd.NA], "cls": [dd.CLS_FP]})
+        fig = ch.fig_sankey(frame, "Критичность")
+        self.assertEqual(len(fig.data), 0)
+
+
 class InsightWordingTest(unittest.TestCase):
     def test_fewer_than_ten_rules_are_not_called_ten(self):
         frame = _cards([(datetime(2024, 1, 1, 10), 1, "MaxPatrol SIEM", "Высокая") for _ in range(3)])

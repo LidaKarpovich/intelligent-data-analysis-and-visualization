@@ -456,6 +456,8 @@ def fig_sankey(d: pd.DataFrame, left_label: str, height: int = 460) -> go.Figure
             order.append("Прочие")
         t = t.loc[order]
     t = t.loc[t.sum(axis=1) > 0]
+    if t.empty or float(t.values.sum()) == 0:
+        return empty()
     rtot = t.sum(axis=0)
     rnames = [c for c in dd.CLASS_ORDER if rtot[c] > 0]
     lnames, ltot, total = list(t.index), t.sum(axis=1), float(t.values.sum())
