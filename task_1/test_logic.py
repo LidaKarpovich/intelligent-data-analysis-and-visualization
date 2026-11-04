@@ -59,6 +59,24 @@ class HourlyCountsTest(unittest.TestCase):
         self.assertNotIn(pd.Timestamp("2024-01-08 10:00"), counts.index)
 
 
+class CalendarGapTest(unittest.TestCase):
+    def test_naive_calendar_dates_do_not_need_a_timezone(self):
+        out = dd._as_naive_date(pd.Series(["2024-01-01", "2024-01-02"]))
+        self.assertIsNone(out.dt.tz)
+        self.assertEqual(out.iloc[0], pd.Timestamp("2024-01-01"))
+        aware = pd.Series(pd.to_datetime(["2024-01-01"], utc=True))
+        self.assertEqual(dd._as_naive_date(aware).iloc[0], pd.Timestamp("2024-01-01"))
+
+    def test_unknown_day_is_not_a_workday(self):
+        frame = _cards([(datetime(2024, 1, 1, 10), 1, "MaxPatrol SIEM", "Высокая")])
+        frame["day_type"] = pd.Series([pd.NA], dtype="Int8")
+        store = _store(frame, {})
+        self.assertEqual(len(dd.apply_filters(store, dd.Filters(day_type="Все дни"))), 1)
+        self.assertEqual(len(dd.apply_filters(store, dd.Filters(day_type="Рабочие"))), 0)
+        self.assertEqual(len(dd.scope_dates(store, dd.Filters(day_type="Рабочие"))), 0)
+        self.assertEqual(len(dd.scope_dates(store, dd.Filters(day_type="Все дни"))), 1)
+
+
 class EmptyDayAverageTest(unittest.TestCase):
     def test_daily_mean_keeps_the_quiet_day(self):
         rows = [

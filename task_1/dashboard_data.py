@@ -79,6 +79,14 @@ def fmt_date(d) -> str:
     return pd.Timestamp(d).strftime("%d.%m.%Y")
 
 
+def _as_naive_date(s: pd.Series) -> pd.Series:
+    """Календарная дата без часового пояса. Наивный столбец не трогаем: tz_localize(None) на нём падает."""
+    s = pd.to_datetime(s)
+    if getattr(s.dt, "tz", None) is not None:
+        s = s.dt.tz_localize(None)
+    return s.dt.normalize()
+
+
 # ---------------------------------------------------------------- загрузка
 def _verdict_class(v: pd.Series) -> pd.Series:
     v = v.fillna("Не указан").str.replace("ё", "е", regex=False)
@@ -99,13 +107,13 @@ def load() -> "Store":
 
     # Таблица периодов: Дата -> Период (7 / 30 / 90 / 180 дней)
     per = pd.read_parquet(DATA / "dataframe.parquet")
-    per["Дата"] = pd.to_datetime(per["Дата"]).dt.tz_localize(None).dt.normalize()
+    per["Дата"] = _as_naive_date(per["Дата"])
     period_dates = {p: set(g["Дата"]) for p, g in per.groupby("Период")}
 
-    # Календарь: Дата -> Тип дня
+    # Календарь: Дата -> Тип дня. Даты вне календаря не считаем рабочими: тип остаётся пустым.
     cal = pd.read_parquet(DATA / "calendar.parquet", columns=["Дата", "Тип дня"])
-    cal["Дата"] = pd.to_datetime(cal["Дата"]).dt.tz_localize(None).dt.normalize()
-    feats["day_type"] = feats["date"].map(cal.set_index("Дата")["Тип дня"]).fillna(1).astype("int8")
+    cal["Дата"] = _as_naive_date(cal["Дата"])
+    feats["day_type"] = feats["date"].map(cal.set_index("Дата")["Тип дня"]).astype("Int8")
 
     feats = feats.sort_values("created", kind="stable")
     top_src = pd.read_parquet(AGG / "agg_top_src.parquet")
