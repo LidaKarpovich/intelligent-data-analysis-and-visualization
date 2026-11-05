@@ -98,13 +98,52 @@ def _work_off_means(d: pd.DataFrame, daily_counts: pd.Series, dates, day_types: 
     return wk, we
 
 
+def span_days(d: pd.DataFrame, dates: pd.DatetimeIndex | None = None) -> int:
+    """Дни, по которым считаются «в день» в плитках и в тексте обзора.
+
+    Это даты фильтра, включая дни без карточек. Число разных дат в выборке их занижает.
+    """
+    if dates is not None and len(dates):
+        return int(len(dates))
+    return int(d["date"].nunique()) if len(d) else 0
+
+
+def kpis(d: pd.DataFrame, f: dd.Filters, dates: pd.DatetimeIndex | None = None) -> dict:
+    """Плитки шапки. Медиана и «в день» — те же величины, что в тексте обзора."""
+    if d.empty:
+        return dict(period_caption="Нет карточек для выбранных фильтров", kpi_n="0", kpi_n_note="",
+                    kpi_fp="—", kpi_fp_note="", kpi_real="—", kpi_real_note="", kpi_none="—",
+                    kpi_none_note="", kpi_react="—", kpi_react_note="")
+    n = len(d)
+    cls = d["cls"].value_counts()
+    days = span_days(d, dates)
+    # Та же медиана, что в «Главном за период» и на гистограмме: без «мгновенных» закрытий.
+    react = dd.plotted_minutes(d["react_min"])
+    parts = [f"{dd.fmt_date(d['date'].min())} — {dd.fmt_date(d['date'].max())}"]
+    if f.day_type != dd.DAY_TYPES[0]:
+        parts.append(f.day_type.lower())
+    if f.source != dd.ALL:
+        parts.append(f.source)
+    if f.crit and len(f.crit) < len(dd.CRIT_ORDER):
+        parts.append("критичность: " + ", ".join(c.lower() for c in dd.CRIT_ORDER if c in f.crit))
+    return dict(
+        period_caption=" · ".join(parts),
+        kpi_n=dd.fmt_int(n), kpi_n_note=f"≈ {dd.fmt_int(n / max(days, 1))} в день, {dd.fmt_int(days)} дн.",
+        kpi_fp=dd.fmt_pct(cls.get(dd.CLS_FP, 0) / n), kpi_fp_note=f"{dd.fmt_int(cls.get(dd.CLS_FP, 0))} карточек",
+        kpi_real=dd.fmt_int(cls.get(dd.CLS_REAL, 0)), kpi_real_note=f"{dd.fmt_pct(cls.get(dd.CLS_REAL, 0) / n)} потока",
+        kpi_none=dd.fmt_pct(cls.get(dd.CLS_NONE, 0) / n), kpi_none_note=f"{dd.fmt_int(cls.get(dd.CLS_NONE, 0))} без вердикта",
+        kpi_react=dd.fmt_minutes(react.median()) if len(react) else "—",
+        kpi_react_note=f"90 % — быстрее {dd.fmt_minutes(react.quantile(0.9))}" if len(react) else "",
+    )
+
+
 # ================================================================ Обзор
 def summary(d: pd.DataFrame, dates: pd.DatetimeIndex | None = None) -> str:
     """Главное за период — 5 тезисов для руководителя SOC."""
     if d.empty:
         return "Нет карточек для выбранных фильтров."
     out = []
-    days = len(dates) if dates is not None and len(dates) else d["date"].nunique()
+    days = span_days(d, dates)
     tr = _trend(d, dates)
     line = f"Поток: {_n(len(d), CARDS, True)} за {dd.fmt_int(days)} дн., в среднем {dd.fmt_int(len(d) / days)} в день"
     if tr and tr[0] > 0:

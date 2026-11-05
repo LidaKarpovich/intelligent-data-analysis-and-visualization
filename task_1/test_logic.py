@@ -1,4 +1,5 @@
 """Синтетические проверки логики дашборда. Не требуют parquet и не запускают Taipy."""
+import math
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -127,6 +128,23 @@ class ChartQuestionTest(unittest.TestCase):
         self.assertEqual(fig.layout.xaxis.type, "log")
         self.assertGreater(fig.layout.xaxis.range[0], -2)
 
+    def test_log_axis_labels_stay_on_their_bubbles(self):
+        # 0,56 минуты попадает внутрь диапазона оси, если подставить минуты вместо log10.
+        # Раньше эта подпись садилась не на свой пузырёк, а две другие уезжали за край.
+        rows = []
+        for rule, solve, cls in (("fast", 0.56, dd.CLS_FP), ("mid", 4.07, dd.CLS_REAL), ("slow", 5.62, dd.CLS_FP)):
+            rows += [{"rule": rule, "cls": cls, "solve_min": solve, "crit_ord": 2} for _ in range(30)]
+        fig = ch.fig_bubble(pd.DataFrame(rows))
+        self.assertEqual(fig.layout.xaxis.type, "log")
+        self.assertEqual(len(fig.layout.annotations), 3)
+        points = {row[0]: x for row, x in zip(fig.data[0].customdata, fig.data[0].x)}
+        lo, hi = fig.layout.xaxis.range
+        for ann in fig.layout.annotations:
+            name = next(rule for rule in points if ann.text.startswith(rule))
+            self.assertAlmostEqual(ann.x, math.log10(points[name]))
+            self.assertGreater(ann.x, lo)
+            self.assertLess(ann.x, hi)
+
 
 class EmptySankeyTest(unittest.TestCase):
     def test_null_criticality_does_not_divide_by_zero(self):
@@ -151,6 +169,24 @@ class InsightWordingTest(unittest.TestCase):
         text = ins.summary(frame)
         self.assertIn("та же медиана", text)
         self.assertNotIn("быстрее", text)
+
+    def test_tiles_match_the_overview_text(self):
+        rows = [(datetime(2024, 1, 1, 10), 1, "MaxPatrol SIEM", "Высокая") for _ in range(6)]
+        rows += [(datetime(2024, 1, 2, 10), 1, "MaxPatrol SIEM", "Высокая") for _ in range(4)]
+        frame = _cards(rows)
+        frame["react_min"] = [0.0] * 6 + [10.0, 10.0, 10.0, 100.0]
+        dates = pd.to_datetime(["2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04"])
+        tiles = ins.kpis(frame, dd.Filters(), dates)
+        text = ins.summary(frame, dates)
+        shown = dd.plotted_minutes(frame["react_min"])
+        self.assertEqual(tiles["kpi_react"], dd.fmt_minutes(shown.median()))
+        self.assertIn(dd.fmt_minutes(shown.quantile(0.9)), tiles["kpi_react_note"])
+        self.assertIn(tiles["kpi_react"], text)
+        self.assertIn(f"за {dd.fmt_int(len(dates))} дн.", text)
+        self.assertIn(f"{dd.fmt_int(len(dates))} дн.", tiles["kpi_n_note"])
+        self.assertIn(f"≈ {dd.fmt_int(len(frame) / len(dates))} в день", tiles["kpi_n_note"])
+        self.assertNotIn(f"{frame['date'].nunique()} дн.", tiles["kpi_n_note"])
+        self.assertNotEqual(tiles["kpi_react"], dd.fmt_minutes(frame["react_min"].median()))
 
     def test_summary_median_skips_instant_closes(self):
         rows = [(datetime(2024, 1, 1, 10), 1, "MaxPatrol SIEM", "Критическая") for _ in range(40)]

@@ -50,31 +50,8 @@ def _filters(s) -> dd.Filters:
 
 
 # ================================================================ расчёт представлений
-def view_header(d: pd.DataFrame, f: dd.Filters) -> dict:
-    if d.empty:
-        return dict(period_caption="Нет карточек для выбранных фильтров", kpi_n="0", kpi_n_note="",
-                    kpi_fp="—", kpi_fp_note="", kpi_real="—", kpi_real_note="", kpi_none="—",
-                    kpi_none_note="", kpi_react="—", kpi_react_note="")
-    n = len(d)
-    cls = d["cls"].value_counts()
-    days = d["date"].nunique()
-    react = d["react_min"].dropna()
-    parts = [f"{dd.fmt_date(d['date'].min())} — {dd.fmt_date(d['date'].max())}"]
-    if f.day_type != DAY_TYPES[0]:
-        parts.append(f.day_type.lower())
-    if f.source != dd.ALL:
-        parts.append(f.source)
-    if f.crit and len(f.crit) < len(CRIT_ORDER):
-        parts.append("критичность: " + ", ".join(c.lower() for c in CRIT_ORDER if c in f.crit))
-    return dict(
-        period_caption=" · ".join(parts),
-        kpi_n=dd.fmt_int(n), kpi_n_note=f"≈ {dd.fmt_int(n / max(days, 1))} в день, {dd.fmt_int(days)} дн.",
-        kpi_fp=dd.fmt_pct(cls.get(dd.CLS_FP, 0) / n), kpi_fp_note=f"{dd.fmt_int(cls.get(dd.CLS_FP, 0))} карточек",
-        kpi_real=dd.fmt_int(cls.get(dd.CLS_REAL, 0)), kpi_real_note=f"{dd.fmt_pct(cls.get(dd.CLS_REAL, 0) / n)} потока",
-        kpi_none=dd.fmt_pct(cls.get(dd.CLS_NONE, 0) / n), kpi_none_note=f"{dd.fmt_int(cls.get(dd.CLS_NONE, 0))} без вердикта",
-        kpi_react=dd.fmt_minutes(react.median()) if len(react) else "—",
-        kpi_react_note=f"90 % — быстрее {dd.fmt_minutes(react.quantile(0.9))}" if len(react) else "",
-    )
+def view_header(d: pd.DataFrame, f: dd.Filters, dates: pd.DatetimeIndex | None = None) -> dict:
+    return ins.kpis(d, f, dates)
 
 
 def view_overview(store: dd.Store, f: dd.Filters, d: pd.DataFrame) -> dict:
@@ -146,8 +123,9 @@ def view_flows(store: dd.Store, d: pd.DataFrame, f: dd.Filters, left: str, hexm:
 
 def compute_all(store: dd.Store, f: dd.Filters, ctl: dict) -> dict:
     d = dd.apply_filters(store, f)
+    dates = dd.scope_dates(store, f)
     out = {}
-    out.update(view_header(d, f))
+    out.update(view_header(d, f, dates))
     out.update(view_overview(store, f, d))
     out.update(view_compare(store, f, d))
     out.update(view_hist(d, ctl["hist_crit"]))

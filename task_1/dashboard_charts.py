@@ -700,7 +700,10 @@ def fig_bubble(d: pd.DataFrame, k: int = 20) -> go.Figure:
                for bx, by, br in bubbles if (bx, by) != (px, py)):
             continue
         placed.append(box)
-        fig.add_annotation(x=r["solve"], y=r["real"], text=text, showarrow=False, yshift=rad + 3 + h / 2,
+        # Plotly ставит подпись через r2p: на логарифмической оси это степень десяти,
+        # как у range, а не минуты. Иначе подпись уезжает за край или садится на чужой пузырёк.
+        ann_x = float(np.log10(r["solve"])) if use_log else float(r["solve"])
+        fig.add_annotation(x=ann_x, y=float(r["real"]), text=text, showarrow=False, yshift=rad + 3 + h / 2,
                            xanchor="left" if px < 0.2 * W else "center" if px < 0.8 * W else "right",
                            font=dict(size=10, color=INK_2), bgcolor="rgba(255,255,255,0.8)")
     fig.update_xaxes(title_text="Медиана времени решения, мин", showgrid=True, gridcolor=GRID, range=axis_range,
