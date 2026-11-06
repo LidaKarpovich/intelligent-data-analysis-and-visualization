@@ -50,42 +50,21 @@ def _filters(s) -> dd.Filters:
 
 
 # ================================================================ расчёт представлений
-def view_header(d: pd.DataFrame, f: dd.Filters) -> dict:
-    if d.empty:
-        return dict(period_caption="Нет карточек для выбранных фильтров", kpi_n="0", kpi_n_note="",
-                    kpi_fp="—", kpi_fp_note="", kpi_real="—", kpi_real_note="", kpi_none="—",
-                    kpi_none_note="", kpi_react="—", kpi_react_note="")
-    n = len(d)
-    cls = d["cls"].value_counts()
-    days = d["date"].nunique()
-    react = d["react_min"].dropna()
-    parts = [f"{dd.fmt_date(d['date'].min())} — {dd.fmt_date(d['date'].max())}"]
-    if f.day_type != DAY_TYPES[0]:
-        parts.append(f.day_type.lower())
-    if f.source != dd.ALL:
-        parts.append(f.source)
-    if f.crit and len(f.crit) < len(CRIT_ORDER):
-        parts.append("критичность: " + ", ".join(c.lower() for c in CRIT_ORDER if c in f.crit))
-    return dict(
-        period_caption=" · ".join(parts),
-        kpi_n=dd.fmt_int(n), kpi_n_note=f"≈ {dd.fmt_int(n / max(days, 1))} в день, {dd.fmt_int(days)} дн.",
-        kpi_fp=dd.fmt_pct(cls.get(dd.CLS_FP, 0) / n), kpi_fp_note=f"{dd.fmt_int(cls.get(dd.CLS_FP, 0))} карточек",
-        kpi_real=dd.fmt_int(cls.get(dd.CLS_REAL, 0)), kpi_real_note=f"{dd.fmt_pct(cls.get(dd.CLS_REAL, 0) / n)} потока",
-        kpi_none=dd.fmt_pct(cls.get(dd.CLS_NONE, 0) / n), kpi_none_note=f"{dd.fmt_int(cls.get(dd.CLS_NONE, 0))} без вердикта",
-        kpi_react=dd.fmt_minutes(react.median()) if len(react) else "—",
-        kpi_react_note=f"90 % — быстрее {dd.fmt_minutes(react.quantile(0.9))}" if len(react) else "",
-    )
+def view_header(d: pd.DataFrame, f: dd.Filters, dates: pd.DatetimeIndex | None = None) -> dict:
+    return ins.kpis(d, f, dates)
 
 
-def view_overview(d: pd.DataFrame) -> dict:
-    return dict(fig_daily=ch.fig_daily(d), fig_mix=ch.fig_class_mix(d), fig_verdicts=ch.fig_verdicts(d),
-                ins_summary=ins.summary(d), ins_daily=ins.daily(d),
+def view_overview(store: dd.Store, f: dd.Filters, d: pd.DataFrame) -> dict:
+    dates = dd.scope_dates(store, f)
+    return dict(fig_daily=ch.fig_daily(d, dates), fig_mix=ch.fig_class_mix(d), fig_verdicts=ch.fig_verdicts(d),
+                ins_summary=ins.summary(d, dates), ins_daily=ins.daily(d, dates, store.day_type_by_date),
                 ins_mix=ins.mix(d, ch.grain_label(d)) if not d.empty else "", ins_verdicts=ins.verdicts(d))
 
 
-def view_compare(d: pd.DataFrame) -> dict:
+def view_compare(store: dd.Store, f: dd.Filters, d: pd.DataFrame) -> dict:
+    dates = dd.scope_dates(store, f)
     out = dict(fig_top_rules=ch.fig_top_rules(d), fig_fp_dev=ch.fig_fp_deviation(d),
-               fig_heat=ch.fig_heatmap_hour(d), rules_tbl=ch.rules_table(d))
+               fig_heat=ch.fig_heatmap_hour(d, dates), rules_tbl=ch.rules_table(d))
     if d.empty:
         out.update(ins_top="", ins_dev="", ins_heat="")
     else:
@@ -98,12 +77,12 @@ def view_hist(d: pd.DataFrame, crit: str) -> dict:
     return dict(fig_hist=ch.fig_histogram(sub), ins_hist=ins.histogram(d, sub, crit))
 
 
-def view_qq(d: pd.DataFrame, log: bool) -> dict:
-    fig, r2, n = ch.fig_qq(d, log)
+def view_qq(store: dd.Store, f: dd.Filters, log: bool) -> dict:
+    counts = dd.hourly_counts(store, f)
+    fig, r2, n = ch.fig_qq(counts, log)
     if not np.isfinite(r2):
         return dict(fig_qq=fig, ins_qq="")
-    x = d.set_index("created").resample("h").size().to_numpy(float)
-    return dict(fig_qq=fig, ins_qq=ins.qq(x, r2, log))
+    return dict(fig_qq=fig, ins_qq=ins.qq(counts.to_numpy(float), r2, log))
 
 
 def view_kde(d: pd.DataFrame, feature: str) -> dict:
@@ -125,9 +104,11 @@ def view_sankey(d: pd.DataFrame, left: str) -> dict:
     return dict(fig_sankey=ch.fig_sankey(d, left), ins_sankey=ins.sankey(d, ch.SANKEY_LEFT[left]))
 
 
-def view_hex(d: pd.DataFrame, mode: str) -> dict:
-    fig, n = ch.fig_hexbin(d, mode)
-    return dict(fig_hex=fig, ins_hex=ins.hexbin(d, mode == ch.HEX_MODES[0], n))
+def view_hex(store: dd.Store, f: dd.Filters, d: pd.DataFrame, mode: str) -> dict:
+    hourly = None if mode == ch.HEX_MODES[0] else dd.hourly_counts(store, f)
+    fig, n = ch.fig_hexbin(d, mode, hourly)
+    return dict(fig_hex=fig, ins_hex=ins.hexbin(d, mode == ch.HEX_MODES[0], n, hourly),
+                hex_title=ch.HEX_QUESTIONS[mode])
 
 
 def view_flows(store: dd.Store, d: pd.DataFrame, f: dd.Filters, left: str, hexm: str) -> dict:
@@ -136,18 +117,19 @@ def view_flows(store: dd.Store, d: pd.DataFrame, f: dd.Filters, left: str, hexm:
                ins_wf=ins.waterfall(prev, cur, n_days, f.period not in store.period_dates),
                fig_bubble=ch.fig_bubble(d), ins_bubble=ins.bubble(d) if not d.empty else "")
     out.update(view_sankey(d, left))
-    out.update(view_hex(d, hexm))
+    out.update(view_hex(store, f, d, hexm))
     return out
 
 
 def compute_all(store: dd.Store, f: dd.Filters, ctl: dict) -> dict:
     d = dd.apply_filters(store, f)
+    dates = dd.scope_dates(store, f)
     out = {}
-    out.update(view_header(d, f))
-    out.update(view_overview(d))
-    out.update(view_compare(d))
+    out.update(view_header(d, f, dates))
+    out.update(view_overview(store, f, d))
+    out.update(view_compare(store, f, d))
     out.update(view_hist(d, ctl["hist_crit"]))
-    out.update(view_qq(d, ctl["qq_log"]))
+    out.update(view_qq(store, f, ctl["qq_log"]))
     out.update(view_kde(d, ctl["kde_feature"]))
     out.update(view_violin(d, ctl["violin_by"]))
     out.update(view_rain(d))
@@ -192,7 +174,7 @@ def on_hist(state, var_name, value):
 
 
 def on_qq(state, var_name, value):
-    _assign(state, view_qq(_d(state), state.qq_log))
+    _assign(state, view_qq(STORE, _filters(state), state.qq_log))
 
 
 def on_kde(state, var_name, value):
@@ -208,7 +190,7 @@ def on_sankey(state, var_name, value):
 
 
 def on_hex(state, var_name, value):
-    _assign(state, view_hex(_d(state), state.hex_mode))
+    _assign(state, view_hex(STORE, _filters(state), _d(state), state.hex_mode))
 
 
 def on_init(state):
@@ -293,7 +275,7 @@ overview_page = """
 <|Каждый столбец — 100 % карточек интервала. Сравнивайте высоту оранжевого и синего сегментов.|text|class_name=hint|>
 |>
 <|part|class_name=card|
-<|Состав вердиктов|text|class_name=card-title|>
+<|Какой вердикт получает карточка?|text|class_name=card-title|>
 <|{ins_verdicts}|text|mode=md|class_name=insight|>
 <|chart|figure={fig_verdicts}|plot_config={PLOT_CONFIG}|height=360px|>
 <|Доля от всех карточек за период и число карточек.|text|class_name=hint|>
@@ -325,7 +307,7 @@ compare_page = """
 |>
 
 <|part|class_name=card|
-<|Топ-15 правил: объём, исход и скорость реакции|text|class_name=card-title|>
+<|У каких правил объём, исход и скорость реакции не совпадают?|text|class_name=card-title|>
 <|Точные значения по самым массовым правилам: сортировка по столбцам и выгрузка в CSV.|text|class_name=insight|>
 <|{rules_tbl}|table|show_all|downloadable|class_name=rules-table|>
 |>
@@ -369,7 +351,7 @@ eda_page = """
 <|layout|columns=1 1|gap=16px|
 <|part|class_name=card|
 <|layout|columns=1 auto|class_name=card-head|
-<|Время взятия в работу по группам|text|class_name=card-title|>
+<|Какие группы ждут взятия в работу дольше?|text|class_name=card-title|>
 
 <|{violin_by}|selector|lov={VIOLIN_LOV}|dropdown|label=Группировка|on_change=on_violin|>
 |>
@@ -378,7 +360,7 @@ eda_page = """
 <|Ширина контура — сколько карточек с таким временем; шкала логарифмическая.|text|class_name=hint|>
 |>
 <|part|class_name=card|
-<|Время решения: L1, L2 и ГИБ|text|class_name=card-title|>
+<|Насколько дольше живёт карточка после эскалации на L2?|text|class_name=card-title|>
 <|{ins_rain}|text|mode=md|class_name=insight|>
 <|chart|figure={fig_rain}|plot_config={PLOT_CONFIG}|height=380px|>
 <|Облако — плотность, ящик — медиана и квартили, точки — до 400 случайных карточек группы.|text|class_name=hint|>
@@ -408,7 +390,7 @@ flows_page = """
 
 <|part|class_name=card|
 <|layout|columns=1 auto|class_name=card-head|
-<|Плотность вместо диаграммы рассеяния|text|class_name=card-title|>
+<|{hex_title}|text|class_name=card-title|>
 
 <|{hex_mode}|selector|lov={HEX_LOV}|dropdown|label=Оси|on_change=on_hex|>
 |>
@@ -419,13 +401,13 @@ flows_page = """
 
 <|layout|columns=2 3|gap=16px|
 <|part|class_name=card|
-<|Топ-20 адресов-источников (src)|text|class_name=card-title|>
+<|Какие адреса-источники порождают больше всего карточек?|text|class_name=card-title|>
 <|{ins_dot}|text|mode=md|class_name=insight|>
 <|chart|figure={fig_dot}|plot_config={PLOT_CONFIG}|height=520px|>
 <|Число карточек, в которых встречается адрес-источник.|text|class_name=hint|>
 |>
 <|part|class_name=card|
-<|Правила: скорость решения и доля реальных инцидентов|text|class_name=card-title|>
+<|Какие правила долго разбирают и при этом находят реальные инциденты?|text|class_name=card-title|>
 <|{ins_bubble}|text|mode=md|class_name=insight|>
 <|chart|figure={fig_bubble}|plot_config={PLOT_CONFIG}|height=480px|>
 <|X — медиана времени решения, Y — доля карточек «Решён», размер — число карточек. Средняя критичность правила — в подсказке.|text|class_name=hint|>

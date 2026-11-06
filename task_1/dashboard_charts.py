@@ -88,12 +88,21 @@ def _short(s: str, n: int = 38) -> str:
 
 
 # ================================================================ 1. ОБЗОР
-def fig_daily(d: pd.DataFrame) -> go.Figure:
+def _daily_series(d: pd.DataFrame, dates: pd.DatetimeIndex | None) -> pd.Series:
+    """Карточки по дням. dates — календарь фильтра: день без карточек остаётся нулём."""
+    s = d.groupby("date").size() if not d.empty else pd.Series(dtype=float)
+    if dates is not None and len(dates):
+        return s.reindex(pd.DatetimeIndex(dates), fill_value=0)
+    if s.empty:
+        return s
+    return s.reindex(pd.date_range(s.index.min(), s.index.max(), freq="D"), fill_value=0)
+
+
+def fig_daily(d: pd.DataFrame, dates: pd.DatetimeIndex | None = None) -> go.Figure:
     """Поток карточек по дням и скользящее среднее за 7 дней."""
-    if d.empty:
+    s = _daily_series(d, dates)
+    if s.empty:
         return empty()
-    s = d.groupby("date").size()
-    s = s.reindex(pd.date_range(s.index.min(), s.index.max(), freq="D"), fill_value=0)
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=s.index, y=s.values, mode="lines", name="за день",
                              line=dict(color=GRAY_LIGHT, width=1.5),
@@ -206,12 +215,21 @@ def fig_fp_deviation(d: pd.DataFrame, min_n: int = 100) -> go.Figure:
     return base(fig, 380, bargap=0.3)
 
 
-def fig_heatmap_hour(d: pd.DataFrame) -> go.Figure:
-    """Среднее число карточек в час по дням недели."""
-    if d.empty:
+def fig_heatmap_hour(d: pd.DataFrame, dates: pd.DatetimeIndex | None = None) -> go.Figure:
+    """Среднее число карточек в час по дням недели.
+
+    Знаменатель — все даты фильтра этого дня недели, включая дни без карточек.
+    """
+    if d.empty and (dates is None or len(dates) == 0):
         return empty()
-    cnt = pd.crosstab(d["dow"], d["hour"]).reindex(index=range(7), columns=range(24), fill_value=0)
-    n_days = d.groupby("dow")["date"].nunique().reindex(range(7)).replace(0, np.nan)
+    dow = d["dow"] if not d.empty else pd.Series(dtype=int)
+    hour = d["hour"] if not d.empty else pd.Series(dtype=int)
+    cnt = pd.crosstab(dow, hour).reindex(index=range(7), columns=range(24), fill_value=0)
+    if dates is not None and len(dates):
+        n_days = pd.Series(pd.DatetimeIndex(dates).dayofweek).value_counts().reindex(range(7), fill_value=0)
+        n_days = n_days.replace(0, np.nan)
+    else:
+        n_days = d.groupby("dow")["date"].nunique().reindex(range(7)).replace(0, np.nan) if not d.empty else pd.Series(np.nan, index=range(7))
     z = cnt.div(n_days, axis=0)
     fig = go.Figure(go.Heatmap(
         z=z.values, x=[f"{h:02d}" for h in range(24)], y=dd.WEEKDAYS, colorscale=[[i / 7, c] for i, c in enumerate(SEQ_BLUE)],
@@ -250,8 +268,8 @@ def fig_histogram(d: pd.DataFrame, col: str = "react_min") -> go.Figure:
     fig = go.Figure(go.Bar(x=mid, y=h, width=0.19, marker=dict(color=BLUE, cornerradius=2), customdata=txt,
                            hovertemplate="%{customdata}: %{y:,} карточек<extra></extra>"))
     # медиана и 90-й процентиль — по ВСЕМ значениям (вместе с «мгновенными»), как в подписи над графиком
-    allv = pd.to_numeric(d[col], errors="coerce").dropna()
-    med, p90 = allv.median(), allv.quantile(0.9)
+    shown = dd.plotted_minutes(d[col])
+    med, p90 = shown.median(), shown.quantile(0.9)
     marks = [(m, lab) for m, lab in [(med, "медиана"), (p90, "90 % быстрее")] if m >= dd.INSTANT_MIN]
     close = len(marks) == 2 and np.log10(marks[1][0]) - np.log10(marks[0][0]) < 1.6
     for i, (m, lab) in enumerate(marks):
@@ -272,16 +290,14 @@ def fig_histogram(d: pd.DataFrame, col: str = "react_min") -> go.Figure:
     return base(fig, 360, margin=dict(l=8, r=16, t=28, b=8), bargap=0)
 
 
-def _hourly_counts(d: pd.DataFrame) -> np.ndarray:
-    s = d.set_index("created").resample("h").size()
-    return s.to_numpy(float)
+def fig_qq(counts: pd.Series, log: bool = False) -> tuple[go.Figure, float, int]:
+    """QQ-график: число карточек в час против нормального закона.
 
-
-def fig_qq(d: pd.DataFrame, log: bool = False) -> tuple[go.Figure, float, int]:
-    """QQ-график: число карточек в час против нормального закона."""
-    if d.empty:
+    counts — ряд только по часам, которые разрешает фильтр периода и типа дня.
+    """
+    if counts is None or len(counts) == 0:
         return empty(), float("nan"), 0
-    x = _hourly_counts(d)
+    x = counts.to_numpy(float)
     if len(x) < 20:
         return empty("Меньше 20 часовых интервалов — выберите больший период"), float("nan"), len(x)
     if log:
@@ -440,6 +456,8 @@ def fig_sankey(d: pd.DataFrame, left_label: str, height: int = 460) -> go.Figure
             order.append("Прочие")
         t = t.loc[order]
     t = t.loc[t.sum(axis=1) > 0]
+    if t.empty or float(t.values.sum()) == 0:
+        return empty()
     rtot = t.sum(axis=0)
     rnames = [c for c in dd.CLASS_ORDER if rtot[c] > 0]
     lnames, ltot, total = list(t.index), t.sum(axis=1), float(t.values.sum())
@@ -545,10 +563,14 @@ def _hexbin(x: np.ndarray, y: np.ndarray, xr, yr, nx: int = 40, aspect: float = 
 
 
 HEX_MODES = ["Время взятия в работу × время решения", "Час суток × карточек за этот час"]
+HEX_QUESTIONS = {
+    HEX_MODES[0]: "Долгое ожидание в очереди означает долгий разбор?",
+    HEX_MODES[1]: "В какие часы поток даёт всплески сильнее обычного?",
+}
 
 
-def fig_hexbin(d: pd.DataFrame, mode: str) -> tuple[go.Figure, int]:
-    if d.empty:
+def fig_hexbin(d: pd.DataFrame, mode: str, hourly: pd.Series | None = None) -> tuple[go.Figure, int]:
+    if d.empty and mode == HEX_MODES[0]:
         return empty(), 0
     if mode == HEX_MODES[0]:
         t = d[["react_min", "solve_min"]].dropna()
@@ -557,7 +579,9 @@ def fig_hexbin(d: pd.DataFrame, mode: str) -> tuple[go.Figure, int]:
         xr, yr = (-2, 5.5), (-2, 5.5)
         xt, yt = "Время взятия в работу (лог. шкала)", "Время решения (лог. шкала)"
     else:
-        s = d.set_index("created").resample("h").size()
+        if hourly is None or len(hourly) == 0:
+            return empty(), 0
+        s = hourly.sort_index()
         x = s.index.hour.to_numpy(float) + np.random.default_rng(RNG_SEED).uniform(-0.5, 0.5, len(s))
         y = s.to_numpy(float)
         xr, yr = (-0.5, 23.5), (0, max(10.0, float(np.quantile(y, 0.995)) * 1.05))
@@ -623,7 +647,7 @@ def fig_bubble(d: pd.DataFrame, k: int = 20) -> go.Figure:
     """Bubble: X — медиана времени решения, Y — доля реальных инцидентов, размер — число карточек."""
     if d.empty:
         return empty()
-    g = d.groupby("rule").agg(n=("cls", "size"), solve=("solve_min", "median"),
+    g = d.groupby("rule").agg(n=("cls", "size"), solve=("solve_min", lambda s: dd.plotted_minutes(s).median()),
                               real=("cls", lambda s: (s == dd.CLS_REAL).mean() * 100),
                               crit=("crit_ord", "mean"))
     g = g[g["n"] >= 30].sort_values("n", ascending=False).head(k).dropna(subset=["solve"])
@@ -637,12 +661,26 @@ def fig_bubble(d: pd.DataFrame, k: int = 20) -> go.Figure:
                     line=dict(color=SURFACE, width=1.5)),
         hovertemplate="%{customdata[0]}<br>карточек: %{customdata[1]:,}<br>медиана решения: %{x:.1f} мин"
                       "<br>доля «Решён»: %{y:.1f} %<br>средняя критичность: %{customdata[2]:.1f} из 4<extra></extra>"))
-    xr = [-0.06 * g["solve"].max() - 0.2, g["solve"].max() * 1.12]
+    positive = g["solve"][g["solve"] >= dd.INSTANT_MIN]
+    use_log = len(positive) == len(g) and float(positive.max() / positive.min()) >= 10
+    if use_log:
+        xr = [float(positive.min()) / 1.4, float(positive.max()) * 1.4]
+        # У оси type=log диапазон задаётся степенями десяти, не самими минутами.
+        axis_range = [float(np.log10(xr[0])), float(np.log10(xr[1]))]
+    else:
+        xr = [-0.06 * g["solve"].max() - 0.2, g["solve"].max() * 1.12]
+        axis_range = xr
     yr = [-0.08 * g["real"].max() - 1, g["real"].max() * 1.18]
     # Подписи: только самые важные пузырьки и только если подпись ни с чем не пересекается.
     # Координаты переводятся в пиксели для типичной области построения ≈ 620 × 400 px.
     W, H = 620, 400
-    to_px = lambda x, y: ((x - xr[0]) / (xr[1] - xr[0]) * W, (y - yr[0]) / (yr[1] - yr[0]) * H)
+
+    def to_px(x, y):
+        if use_log:
+            px = (np.log10(x) - np.log10(xr[0])) / (np.log10(xr[1]) - np.log10(xr[0])) * W
+        else:
+            px = (x - xr[0]) / (xr[1] - xr[0]) * W
+        return px, (y - yr[0]) / (yr[1] - yr[0]) * H
     bubbles = [(*to_px(r["solve"], r["real"]), np.sqrt(r["n"] / sizeref) / 2) for _, r in g.iterrows()]
     order = pd.concat([g.nlargest(2, "real"), g.head(3), g.nlargest(1, "solve"), g.nsmallest(1, "real")])
     placed = []
@@ -662,9 +700,13 @@ def fig_bubble(d: pd.DataFrame, k: int = 20) -> go.Figure:
                for bx, by, br in bubbles if (bx, by) != (px, py)):
             continue
         placed.append(box)
-        fig.add_annotation(x=r["solve"], y=r["real"], text=text, showarrow=False, yshift=rad + 3 + h / 2,
+        # Plotly ставит подпись через r2p: на логарифмической оси это степень десяти,
+        # как у range, а не минуты. Иначе подпись уезжает за край или садится на чужой пузырёк.
+        ann_x = float(np.log10(r["solve"])) if use_log else float(r["solve"])
+        fig.add_annotation(x=ann_x, y=float(r["real"]), text=text, showarrow=False, yshift=rad + 3 + h / 2,
                            xanchor="left" if px < 0.2 * W else "center" if px < 0.8 * W else "right",
                            font=dict(size=10, color=INK_2), bgcolor="rgba(255,255,255,0.8)")
-    fig.update_xaxes(title_text="Медиана времени решения, мин", showgrid=True, gridcolor=GRID, range=xr)
+    fig.update_xaxes(title_text="Медиана времени решения, мин", showgrid=True, gridcolor=GRID, range=axis_range,
+                     type="log" if use_log else "linear")
     fig.update_yaxes(title_text="Доля карточек «Решён», %", range=yr)
     return base(fig, 480)

@@ -6,8 +6,6 @@ dashboard_data.py — загрузка данных, фильтры и агре�
     data/agg/agg_top_src.parquet  — топ-20 src по числу карточек (считается в etl.py)
     data/dataframe.parquet        — таблица периодов: Дата -> Период (7/30/90/180 дней)
     data/calendar.parquet         — календарь: Дата -> Тип дня (рабочий / пятница / праздник / выходной)
-
-Модельные файлы (predictions, shap_sample, pdp, bias_variance) здесь НЕ используются.
 """
 from __future__ import annotations
 
@@ -79,6 +77,14 @@ def fmt_date(d) -> str:
     return pd.Timestamp(d).strftime("%d.%m.%Y")
 
 
+def _as_naive_date(s: pd.Series) -> pd.Series:
+    """Календарная дата без часового пояса. Наивный столбец не трогаем: tz_localize(None) на нём падает."""
+    s = pd.to_datetime(s)
+    if getattr(s.dt, "tz", None) is not None:
+        s = s.dt.tz_localize(None)
+    return s.dt.normalize()
+
+
 # ---------------------------------------------------------------- загрузка
 def _verdict_class(v: pd.Series) -> pd.Series:
     v = v.fillna("Не указан").str.replace("ё", "е", regex=False)
@@ -99,16 +105,19 @@ def load() -> "Store":
 
     # Таблица периодов: Дата -> Период (7 / 30 / 90 / 180 дней)
     per = pd.read_parquet(DATA / "dataframe.parquet")
-    per["Дата"] = pd.to_datetime(per["Дата"]).dt.tz_localize(None).dt.normalize()
+    per["Дата"] = _as_naive_date(per["Дата"])
     period_dates = {p: set(g["Дата"]) for p, g in per.groupby("Период")}
 
-    # Календарь: Дата -> Тип дня
+    # Календарь: Дата -> Тип дня. Даты вне календаря не считаем рабочими: тип остаётся пустым.
     cal = pd.read_parquet(DATA / "calendar.parquet", columns=["Дата", "Тип дня"])
-    cal["Дата"] = pd.to_datetime(cal["Дата"]).dt.tz_localize(None).dt.normalize()
-    feats["day_type"] = feats["date"].map(cal.set_index("Дата")["Тип дня"]).fillna(1).astype("int8")
+    cal["Дата"] = _as_naive_date(cal["Дата"])
+    feats["day_type"] = feats["date"].map(cal.set_index("Дата")["Тип дня"]).astype("Int8")
 
+    feats = feats.sort_values("created", kind="stable")
     top_src = pd.read_parquet(AGG / "agg_top_src.parquet")
-    return Store(feats=feats, period_dates=period_dates, top_src=top_src)
+    # Календарь целиком, а не только даты, где уже есть карточки: пустой день нужного типа — ноль, не пропуск
+    return Store(feats=feats, period_dates=period_dates, top_src=top_src,
+                 day_type_by_date=cal.set_index("Дата")["Тип дня"])
 
 
 @dataclass
@@ -116,6 +125,7 @@ class Store:
     feats: pd.DataFrame
     period_dates: dict
     top_src: pd.DataFrame
+    day_type_by_date: pd.Series = field(default_factory=lambda: pd.Series(dtype="float"))
 
 
 @dataclass
@@ -136,9 +146,55 @@ def apply_filters(store: Store, f: Filters) -> pd.DataFrame:
     if f.source != ALL:
         m &= (d["source_grp"] == f.source).to_numpy()
     crit = [c for c in (f.crit or []) if c in CRIT_ORDER]
-    if crit and len(crit) < len(CRIT_ORDER):
+    if not crit:
+        return d.iloc[0:0]
+    if len(crit) < len(CRIT_ORDER):
         m &= d["crit"].isin(crit).to_numpy()
     return d[m]
+
+
+def scope_dates(store: Store, f: Filters) -> pd.DatetimeIndex:
+    """Даты, которые проходят фильтр периода и типа дня.
+
+    Источник и критичность дату не выкидывают: час без таких карточек — настоящий ноль.
+    Даты без записи в календаре при выбранном типе дня не входят (их тип неизвестен).
+    """
+    if f.period in store.period_dates:
+        dates = pd.DatetimeIndex(sorted(pd.to_datetime(list(store.period_dates[f.period])))).normalize()
+    else:
+        raw = pd.DatetimeIndex(pd.unique(store.feats["date"])).sort_values()
+        if len(raw) == 0:
+            return raw
+        dates = pd.date_range(raw.min(), raw.max(), freq="D")
+    if f.day_type not in DAY_TYPE_CODES:
+        return pd.DatetimeIndex(dates)
+    codes = DAY_TYPE_CODES[f.day_type]
+    by_date = store.day_type_by_date
+    keep = []
+    for dt in dates:
+        code = by_date.get(pd.Timestamp(dt), pd.NA)
+        if pd.isna(code) or int(code) not in codes:
+            continue
+        keep.append(pd.Timestamp(dt))
+    return pd.DatetimeIndex(keep)
+
+
+def hourly_counts(store: Store, f: Filters) -> pd.Series:
+    """Карточки по часам только для дат из scope_dates.
+
+    Часы другого типа дня не заполняются нулём. Час нужного типа без карточек — ноль.
+    """
+    dates = scope_dates(store, f)
+    if len(dates) == 0:
+        return pd.Series(dtype=float)
+    index = pd.DatetimeIndex(np.concatenate([
+        pd.date_range(pd.Timestamp(day), periods=24, freq="h").to_numpy() for day in dates
+    ]))
+    d = apply_filters(store, f)
+    if d.empty:
+        return pd.Series(0, index=index, dtype=float)
+    counts = d["created"].dt.floor("h").value_counts()
+    return counts.reindex(index, fill_value=0).astype(float).sort_index()
 
 
 def previous_window(store: Store, f: Filters) -> tuple[pd.DataFrame, pd.DataFrame, int]:
@@ -154,10 +210,16 @@ def previous_window(store: Store, f: Filters) -> tuple[pd.DataFrame, pd.DataFram
     return prev, cur, n_days
 
 
+def plotted_minutes(s: pd.Series) -> pd.Series:
+    """Те же длительности, что попадают на логарифмическую шкалу: без пропусков и «мгновенных»."""
+    v = pd.to_numeric(s, errors="coerce").dropna()
+    return v[v >= INSTANT_MIN]
+
+
 def log_minutes(s: pd.Series) -> np.ndarray:
     """Минуты -> log10; пропуски и «мгновенные» (< 0,01 мин) отбрасываем (лог-шкала их не покажет)."""
-    v = pd.to_numeric(s, errors="coerce").dropna().to_numpy(float)
-    return np.log10(v[v >= INSTANT_MIN])
+    v = plotted_minutes(s).to_numpy(float)
+    return np.log10(v)
 
 
 def instant_share(s: pd.Series) -> float:

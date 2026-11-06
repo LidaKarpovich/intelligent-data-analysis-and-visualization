@@ -65,24 +65,86 @@ def _short(s, n: int = 48) -> str:
     return s if len(s) <= n else s[: n - 1] + "…"
 
 
-def _trend(d: pd.DataFrame) -> tuple[float, float] | None:
+def _trend(d: pd.DataFrame, dates: pd.DatetimeIndex | None = None) -> tuple[float, float] | None:
     """Средний поток в день: первая и последняя четверть периода (нужно ≥ 8 дней)."""
-    s = d.groupby("date").size()
+    s = d.groupby("date").size() if not d.empty else pd.Series(dtype=float)
+    if dates is not None and len(dates):
+        s = s.reindex(pd.DatetimeIndex(dates), fill_value=0)
+    elif len(s):
+        s = s.reindex(pd.date_range(s.index.min(), s.index.max(), freq="D"), fill_value=0)
     if len(s) < 8:
         return None
-    s = s.reindex(pd.date_range(s.index.min(), s.index.max(), freq="D"), fill_value=0)
     q = max(len(s) // 4, 2)
     return float(s.iloc[:q].mean()), float(s.iloc[-q:].mean())
 
 
+def _work_mask(day_type: pd.Series) -> pd.Series:
+    return day_type.isin(list(dd.DAY_TYPE_CODES["Рабочие"]))
+
+
+def _off_mask(day_type: pd.Series) -> pd.Series:
+    return day_type.isin(list(dd.DAY_TYPE_CODES["Выходные и праздники"]))
+
+
+def _work_off_means(d: pd.DataFrame, daily_counts: pd.Series, dates, day_types: pd.Series | None):
+    """Среднее карточек в календарный рабочий день и в выходной/праздник, включая тихие дни."""
+    if day_types is None or dates is None or len(dates) == 0 or d.empty:
+        return np.nan, np.nan
+    types = pd.Series({pd.Timestamp(t): day_types.get(pd.Timestamp(t), pd.NA) for t in pd.DatetimeIndex(dates)})
+    work_idx = types.index[_work_mask(types)]
+    off_idx = types.index[_off_mask(types)]
+    wk = daily_counts.reindex(work_idx, fill_value=0).mean() if len(work_idx) else np.nan
+    we = daily_counts.reindex(off_idx, fill_value=0).mean() if len(off_idx) else np.nan
+    return wk, we
+
+
+def span_days(d: pd.DataFrame, dates: pd.DatetimeIndex | None = None) -> int:
+    """Дни, по которым считаются «в день» в плитках и в тексте обзора.
+
+    Это даты фильтра, включая дни без карточек. Число разных дат в выборке их занижает.
+    """
+    if dates is not None and len(dates):
+        return int(len(dates))
+    return int(d["date"].nunique()) if len(d) else 0
+
+
+def kpis(d: pd.DataFrame, f: dd.Filters, dates: pd.DatetimeIndex | None = None) -> dict:
+    """Плитки шапки. Медиана и «в день» — те же величины, что в тексте обзора."""
+    if d.empty:
+        return dict(period_caption="Нет карточек для выбранных фильтров", kpi_n="0", kpi_n_note="",
+                    kpi_fp="—", kpi_fp_note="", kpi_real="—", kpi_real_note="", kpi_none="—",
+                    kpi_none_note="", kpi_react="—", kpi_react_note="")
+    n = len(d)
+    cls = d["cls"].value_counts()
+    days = span_days(d, dates)
+    # Та же медиана, что в «Главном за период» и на гистограмме: без «мгновенных» закрытий.
+    react = dd.plotted_minutes(d["react_min"])
+    parts = [f"{dd.fmt_date(d['date'].min())} — {dd.fmt_date(d['date'].max())}"]
+    if f.day_type != dd.DAY_TYPES[0]:
+        parts.append(f.day_type.lower())
+    if f.source != dd.ALL:
+        parts.append(f.source)
+    if f.crit and len(f.crit) < len(dd.CRIT_ORDER):
+        parts.append("критичность: " + ", ".join(c.lower() for c in dd.CRIT_ORDER if c in f.crit))
+    return dict(
+        period_caption=" · ".join(parts),
+        kpi_n=dd.fmt_int(n), kpi_n_note=f"≈ {dd.fmt_int(n / max(days, 1))} в день, {dd.fmt_int(days)} дн.",
+        kpi_fp=dd.fmt_pct(cls.get(dd.CLS_FP, 0) / n), kpi_fp_note=f"{dd.fmt_int(cls.get(dd.CLS_FP, 0))} карточек",
+        kpi_real=dd.fmt_int(cls.get(dd.CLS_REAL, 0)), kpi_real_note=f"{dd.fmt_pct(cls.get(dd.CLS_REAL, 0) / n)} потока",
+        kpi_none=dd.fmt_pct(cls.get(dd.CLS_NONE, 0) / n), kpi_none_note=f"{dd.fmt_int(cls.get(dd.CLS_NONE, 0))} без вердикта",
+        kpi_react=dd.fmt_minutes(react.median()) if len(react) else "—",
+        kpi_react_note=f"90 % — быстрее {dd.fmt_minutes(react.quantile(0.9))}" if len(react) else "",
+    )
+
+
 # ================================================================ Обзор
-def summary(d: pd.DataFrame) -> str:
+def summary(d: pd.DataFrame, dates: pd.DatetimeIndex | None = None) -> str:
     """Главное за период — 5 тезисов для руководителя SOC."""
     if d.empty:
         return "Нет карточек для выбранных фильтров."
     out = []
-    days = d["date"].nunique()
-    tr = _trend(d)
+    days = span_days(d, dates)
+    tr = _trend(d, dates)
     line = f"Поток: {_n(len(d), CARDS, True)} за {dd.fmt_int(days)} дн., в среднем {dd.fmt_int(len(d) / days)} в день"
     if tr and tr[0] > 0:
         a, b = tr
@@ -113,32 +175,46 @@ def summary(d: pd.DataFrame) -> str:
         nv = d.loc[d["cls"] == dd.CLS_NONE, "rule"].value_counts()
         out.append(f"Разметка: {_b(dd.fmt_pct(none))} карточек без вердикта, "
                    f"{dd.fmt_pct(nv.iloc[0] / nv.sum())} из них — правило {_short(nv.index[0], 40)}. "
-                   "Пока они не размечены, доли FP и инцидентов оценены только по закрытым карточкам.")
+                   "Доли FP и инцидентов посчитаны по всем карточкам, поэтому неразмеченные карточки эти доли занижают.")
 
-    react = d["react_min"].dropna()
-    crit = d.loc[d["crit"] == "Критическая", "react_min"].dropna()
+    react_all = pd.to_numeric(d["react_min"], errors="coerce").dropna()
+    react = dd.plotted_minutes(react_all)
+    crit = dd.plotted_minutes(d.loc[d["crit"] == "Критическая", "react_min"])
+    # Та же медиана, что на гистограмме и скрипке: «мгновенные» закрытия не входят.
+    instant = ""
+    if len(react_all) and dd.instant_share(react_all) >= 0.001:
+        instant = (f" Доля взятых «мгновенно» (< 0,6 с) — {dd.fmt_pct(dd.instant_share(react_all))}; "
+                   "в эту медиану они не входят.")
     if len(react) and len(crit) < 30:
         out.append(f"Реакция: медиана взятия в работу {_b(_t(react.median()))}, 90 % карточек берутся быстрее "
-                   f"{_t(react.quantile(0.9))}, дольше суток ждут {dd.fmt_pct((react > 1440).mean())}.")
+                   f"{_t(react.quantile(0.9))}, дольше суток ждут {dd.fmt_pct((react > 1440).mean())}.{instant}")
     if len(react) and len(crit) >= 30:
         mc, ma = crit.median(), react.median()
-        word = "медленнее" if mc > ma else "быстрее"
-        line = f"Реакция: медиана взятия в работу {_b(_t(ma))}; критические карточки берут {word} — {_b(_t(mc))}"
-        if mc > 0 and ma > 0:
-            line += f" ({_ratio(max(mc, ma), min(mc, ma))})"
-        line += ". Критичность пока не ускоряет реакцию — её стоит учитывать в очереди." if mc > ma else "."
-        out.append(line)
+        if mc == ma:
+            line = (f"Реакция: медиана взятия в работу {_b(_t(ma))}; "
+                    "у критических карточек та же медиана.")
+        else:
+            word = "медленнее" if mc > ma else "быстрее"
+            line = f"Реакция: медиана взятия в работу {_b(_t(ma))}; критические карточки берут {word} — {_b(_t(mc))}"
+            if mc > 0 and ma > 0:
+                line += f" ({_ratio(max(mc, ma), min(mc, ma))})"
+            line += ". Критичность пока не ускоряет реакцию — её стоит учитывать в очереди." if mc > ma else "."
+        out.append(line + instant)
     return "\n".join(f"- {s}" for s in out)
 
 
-def daily(d: pd.DataFrame) -> str:
-    if d.empty:
+def daily(d: pd.DataFrame, dates: pd.DatetimeIndex | None = None,
+          day_types: pd.Series | None = None) -> str:
+    if d.empty and (dates is None or len(dates) == 0):
         return ""
-    s = d.groupby("date").size()
-    wk = d[d["dow"] < 5].groupby("date").size().mean()
-    we = d[d["dow"] >= 5].groupby("date").size().mean()
+    s = d.groupby("date").size() if not d.empty else pd.Series(dtype=float)
+    if dates is not None and len(dates):
+        s = s.reindex(pd.DatetimeIndex(dates), fill_value=0)
+    if s.empty:
+        return ""
+    wk, we = _work_off_means(d, s, dates, day_types)
     txt = (f"В среднем {_b(dd.fmt_int(s.mean()))} {plural(s.mean(), CARDS)} в день, пик — {_b(dd.fmt_int(s.max()))} "
-           f"({dd.fmt_date(s.idxmax())}, {_ratio(s.max(), s.mean())} выше среднего).")
+           f"({dd.fmt_date(s.idxmax())}, {_ratio(s.max(), s.mean())} больше среднего).")
     if np.isfinite(wk) and np.isfinite(we) and we > 0:
         txt += f" По будням поток {_ratio(wk, we)} больше, чем в выходные ({dd.fmt_int(wk)} против {dd.fmt_int(we)})."
     spikes = (s > s.mean() + 3 * s.std()).sum()
@@ -171,7 +247,7 @@ def mix(d: pd.DataFrame, freq_label: str) -> str:
     if len(bad):
         txt += (f" В {len(bad)} {plural(len(bad), ('интервале', 'интервалах', 'интервалах'))} больше 20 % карточек без вердикта (максимум "
                 f"{dd.fmt_pct(bad.max())}, {bad.idxmax().strftime(fmt)}): там доли FP и инцидентов занижены.")
-    wk, we = d[d["dow"] < 5], d[d["dow"] >= 5]
+    wk, we = d[_work_mask(d["day_type"])], d[_off_mask(d["day_type"])]
     if len(wk) >= 100 and len(we) >= 100:
         rk, re_ = _share(wk, dd.CLS_REAL), _share(we, dd.CLS_REAL)
         if abs(re_ - rk) >= 0.05:
@@ -200,7 +276,10 @@ def top_rules(d: pd.DataFrame) -> str:
     top = vc.head(10).index
     g = d[d["rule"].isin(top)].groupby("rule")["cls"].value_counts(normalize=True).unstack(fill_value=0)
     g = g.reindex(columns=dd.CLASS_ORDER, fill_value=0)
-    txt = f"10 правил из {dd.fmt_int(len(vc))} дают {_b(dd.fmt_pct(vc.head(10).sum() / len(d)))} всех карточек."
+    n_top = len(top)
+    verb = "даёт" if plural(n_top, RULES) == "правило" else "дают"
+    txt = (f"{_n(n_top, RULES).capitalize()} из {dd.fmt_int(len(vc))} {verb} "
+           f"{_b(dd.fmt_pct(vc.head(n_top).sum() / len(d)))} всех карточек.")
     noisy = g[(g[dd.CLS_REAL] < 0.01)].index
     if len(noisy):
         share = vc[noisy].sum() / len(d)
@@ -236,12 +315,13 @@ def heatmap(d: pd.DataFrame) -> str:
         return ""
     t = pd.crosstab(d["dow"], d["hour"])
     i, j = np.unravel_index(np.argmax(t.values), t.shape)
-    work = (d["dow"] < 5) & d["hour"].between(9, 17)
+    work_day = _work_mask(d["day_type"])
+    work = work_day & d["hour"].between(9, 17)
     night = d["hour"].between(0, 5).mean()
     txt = (f"Пик нагрузки — {_b(f'{dd.WEEKDAYS[t.index[i]]}, {t.columns[j]:02d}:00')}. "
            f"В рабочие часы будней (09–18) поступает {_b(dd.fmt_pct(work.mean()))} карточек, "
            f"ночью (00–06) — {dd.fmt_pct(night)}.")
-    if (d["dow"] < 5).mean() < 0.05:              # выбраны только выходные
+    if work_day.mean() < 0.05:                    # праздник в понедельник — не будний день
         return (f"Пик нагрузки — {_b(f'{dd.WEEKDAYS[t.index[i]]}, {t.columns[j]:02d}:00')}; "
                 f"ночью (00–06) поступает {dd.fmt_pct(night)} карточек.")
     txt += (" Поток привязан к рабочему дню пользователей — дневную смену L1 стоит усиливать, "
@@ -252,7 +332,8 @@ def heatmap(d: pd.DataFrame) -> str:
 
 # ================================================================ Распределения
 def histogram(d_all: pd.DataFrame, sub: pd.DataFrame, crit: str) -> str:
-    react = sub["react_min"].dropna()
+    react_all = pd.to_numeric(sub["react_min"], errors="coerce").dropna()
+    react = dd.plotted_minutes(sub["react_min"])
     if len(react) < 10:
         who = "карточек" if crit == dd.ALL else f"карточек с критичностью «{crit}»"
         return (f"За выбранный период меньше 10 {who} с заполненным временем взятия в работу — выберите другой "
@@ -263,13 +344,13 @@ def histogram(d_all: pd.DataFrame, sub: pd.DataFrame, crit: str) -> str:
     txt += (f", но {_b(dd.fmt_pct(tail))} ждут дольше суток — длинный правый хвост: это карточки, о которых "
             "забыли в очереди." if tail >= 0.01 else "; дольше суток почти никто не ждёт.")
     if crit != dd.ALL:
-        base = d_all["react_min"].dropna()
+        base = dd.plotted_minutes(d_all["react_min"])
         if len(base) and base.median() > 0 and med > 0:
             word = "дольше" if med > base.median() else "быстрее"
             txt += (f" Это {_ratio(max(med, base.median()), min(med, base.median()))} {word}, чем по всем карточкам "
                     f"({_t(base.median())}).")
-    txt += (f" Ещё {dd.fmt_pct(dd.instant_share(react))} взяты «мгновенно» (< 0,6 с, автоматика) и на логарифмической "
-            "шкале не показаны.")
+    txt += (f" Доля взятых «мгновенно» (< 0,6 с, автоматика) — {dd.fmt_pct(dd.instant_share(react_all))}; "
+            "на логарифмической шкале они не показаны.")
     return txt
 
 
@@ -338,8 +419,8 @@ def kde(d: pd.DataFrame, col: str, is_log: bool, ns: dict) -> str:
 def violin(d: pd.DataFrame, col: str, groups: list) -> str:
     med, slow = {}, {}
     for g in groups:
-        v = d.loc[d[col] == g, "react_min"].dropna()
-        if len(dd.log_minutes(v)) >= 30:               # те же группы, что показаны на графике
+        v = dd.plotted_minutes(d.loc[d[col] == g, "react_min"])
+        if len(v) >= 30:                               # те же группы, что показаны на графике
             med[g] = v.median()
             slow[g] = (v > 1440).mean()
     if len(med) < 2:
@@ -361,13 +442,14 @@ def violin(d: pd.DataFrame, col: str, groups: list) -> str:
 def raincloud(d: pd.DataFrame) -> str:
     med, day = {}, {}
     for g in dd.GROUP_ORDER:
-        v = d.loc[d["group"] == g, "solve_min"].dropna()
+        raw = pd.to_numeric(d.loc[d["group"] == g, "solve_min"], errors="coerce").dropna()
+        v = dd.plotted_minutes(raw)
         if len(v) >= 5:
-            med[g], day[g] = v.median(), (v > 1440).mean()
+            med[g], day[g] = v.median(), (raw > 1440).mean()
     if not med:
         return ""
     txt = "Медиана времени решения: " + "; ".join(f"{g} — {_b(_t(m))}" for g, m in med.items()) + "."
-    if "L1" in med and "L2" in med and med["L1"] > 0:
+    if "L1" in med and "L2" in med and med["L1"] >= dd.INSTANT_MIN:
         txt += f" Карточка, ушедшая на L2, решается {_ratio(med['L2'], med['L1'])} дольше"
         txt += (f"; {dd.fmt_pct(day['L2'])} таких карточек живут больше суток." if day["L2"] >= 0.005 else ".")
         txt += " Эскалация — дорогой путь, поэтому важно, чтобы на L2 уходили только реальные инциденты."
@@ -429,7 +511,7 @@ def waterfall(prev: pd.DataFrame, cur: pd.DataFrame, n_days: int, whole_period: 
     return txt
 
 
-def hexbin(d: pd.DataFrame, mode_first: bool, n: int) -> str:
+def hexbin(d: pd.DataFrame, mode_first: bool, n: int, hourly: pd.Series | None = None) -> str:
     if mode_first:
         t = d[["react_min", "solve_min"]].dropna()
         t = t[(t["react_min"] >= dd.INSTANT_MIN) & (t["solve_min"] >= dd.INSTANT_MIN)]
@@ -445,7 +527,7 @@ def hexbin(d: pd.DataFrame, mode_first: bool, n: int) -> str:
                 + (": долгое ожидание в очереди не означает долгого разбора." if abs(rho) < 0.3 else
                    ": карточки, которые долго ждут, обычно и разбираются дольше.")
                 + f" Самая плотная сота — взятие ≈ {dd.fmt_minutes(x)}, решение ≈ {dd.fmt_minutes(y)}.")
-    s = d.set_index("created").resample("h").size()
+    s = hourly if hourly is not None else pd.Series(dtype=float)
     if len(s) < 100:
         return ""
     by_h = s.groupby(s.index.hour)
@@ -460,7 +542,8 @@ def hexbin(d: pd.DataFrame, mode_first: bool, n: int) -> str:
 def dotplot(top_src: pd.DataFrame) -> str:
     s = top_src.sort_values("n_cards", ascending=False)
     private = s["src"].str.match(r"^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)")
-    g = s["src"].str.startswith("142.25")
+    parts = s["src"].str.split(".", n=3, expand=True)
+    g = (parts[0] == "142") & parts[1].isin(["250", "251"])
     txt = (f"Лидер — {_b(s['src'].iloc[0])}: {_n(s['n_cards'].iloc[0], CARDS)}. "
            f"Внешних адресов в топе — {_b(int((~private).sum()))} из {len(s)}")
     if g.sum() >= 3:
@@ -472,7 +555,7 @@ def dotplot(top_src: pd.DataFrame) -> str:
 
 
 def bubble(d: pd.DataFrame) -> str:
-    g = d.groupby("rule").agg(n=("cls", "size"), solve=("solve_min", "median"),
+    g = d.groupby("rule").agg(n=("cls", "size"), solve=("solve_min", lambda s: dd.plotted_minutes(s).median()),
                               real=("cls", lambda s: (s == dd.CLS_REAL).mean()))
     g = g[g["n"] >= 30].sort_values("n", ascending=False).head(20).dropna()
     if len(g) < 3:

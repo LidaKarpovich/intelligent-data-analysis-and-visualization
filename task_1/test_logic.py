@@ -1,0 +1,269 @@
+"""Синтетические проверки логики дашборда. Не требуют parquet и не запускают Taipy."""
+import math
+import unittest
+from datetime import datetime
+from pathlib import Path
+
+import pandas as pd
+
+import dashboard_charts as ch
+import dashboard_data as dd
+import dashboard_insights as ins
+
+
+def _cards(rows: list[tuple]) -> pd.DataFrame:
+    """rows: (created, day_type, source, crit)."""
+    created = [pd.Timestamp(r[0]) for r in rows]
+    frame = pd.DataFrame({
+        "created": created,
+        "date": [c.normalize() for c in created],
+        "day_type": [r[1] for r in rows],
+        "source_grp": [r[2] for r in rows],
+        "crit": pd.Categorical([r[3] for r in rows], categories=dd.CRIT_ORDER, ordered=True),
+        "cls": dd.CLS_FP,
+        "dow": [c.dayofweek for c in created],
+        "hour": [c.hour for c in created],
+        "rule": "rule-a",
+        "irp": "irp-a",
+        "react_min": 10.0,
+        "solve_min": 20.0,
+        "verdict_txt": "False Positive",
+    })
+    return frame
+
+
+def _store(frame: pd.DataFrame, calendar: dict, periods: dict | None = None) -> dd.Store:
+    by_date = pd.Series({pd.Timestamp(k): v for k, v in calendar.items()})
+    return dd.Store(feats=frame.sort_values("created"), period_dates=periods or {},
+                    top_src=pd.DataFrame(columns=["src", "n_cards"]), day_type_by_date=by_date)
+
+
+class HourlyCountsTest(unittest.TestCase):
+    def test_weekend_filter_does_not_invent_weekday_zeros(self):
+        # Две субботы и воскресенье между ними. Раньше resample дописывал нули на будни.
+        rows = [
+            (datetime(2024, 1, 6, 12, 0), 4, "MaxPatrol SIEM", "Высокая"),
+            (datetime(2024, 1, 6, 12, 30), 4, "MaxPatrol SIEM", "Высокая"),
+            (datetime(2024, 1, 13, 12, 0), 4, "MaxPatrol SIEM", "Низкая"),
+        ]
+        calendar = {}
+        for day in pd.date_range("2024-01-06", "2024-01-13", freq="D"):
+            calendar[day] = 4 if day.dayofweek >= 5 else 1
+        store = _store(_cards(rows), calendar)
+        counts = dd.hourly_counts(store, dd.Filters(day_type="Выходные и праздники"))
+        self.assertFalse((counts.index.dayofweek < 5).any())
+        # 6–7 и 13 января: два выходных + воскресенье 7-го. 13-е суббота, 14-е вне диапазона карточек? 
+        # scope для «весь период» — от первой до последней даты в данных (6–13), из них только тип 4.
+        weekend_days = [d for d in pd.date_range("2024-01-06", "2024-01-13") if d.dayofweek >= 5]
+        self.assertEqual(len(counts), len(weekend_days) * 24)
+        self.assertEqual(counts.loc[pd.Timestamp("2024-01-06 12:00")], 2)
+        self.assertEqual(counts.loc[pd.Timestamp("2024-01-07 00:00")], 0)
+        self.assertNotIn(pd.Timestamp("2024-01-08 10:00"), counts.index)
+
+
+class CalendarGapTest(unittest.TestCase):
+    def test_naive_calendar_dates_do_not_need_a_timezone(self):
+        out = dd._as_naive_date(pd.Series(["2024-01-01", "2024-01-02"]))
+        self.assertIsNone(out.dt.tz)
+        self.assertEqual(out.iloc[0], pd.Timestamp("2024-01-01"))
+        aware = pd.Series(pd.to_datetime(["2024-01-01"], utc=True))
+        self.assertEqual(dd._as_naive_date(aware).iloc[0], pd.Timestamp("2024-01-01"))
+
+    def test_unknown_day_is_not_a_workday(self):
+        frame = _cards([(datetime(2024, 1, 1, 10), 1, "MaxPatrol SIEM", "Высокая")])
+        frame["day_type"] = pd.Series([pd.NA], dtype="Int8")
+        store = _store(frame, {})
+        self.assertEqual(len(dd.apply_filters(store, dd.Filters(day_type="Все дни"))), 1)
+        self.assertEqual(len(dd.apply_filters(store, dd.Filters(day_type="Рабочие"))), 0)
+        self.assertEqual(len(dd.scope_dates(store, dd.Filters(day_type="Рабочие"))), 0)
+        self.assertEqual(len(dd.scope_dates(store, dd.Filters(day_type="Все дни"))), 1)
+
+
+class CalendarDayTypeInsightTest(unittest.TestCase):
+    def test_holiday_monday_is_not_called_a_workday(self):
+        rows = [
+            (datetime(2024, 1, 1, 11), 3, "MaxPatrol SIEM", "Высокая"),
+            *[(datetime(2024, 1, 2, 11), 1, "MaxPatrol SIEM", "Высокая") for _ in range(9)],
+        ]
+        dates = pd.to_datetime(["2024-01-01", "2024-01-02"])
+        types = pd.Series({pd.Timestamp("2024-01-01"): 3, pd.Timestamp("2024-01-02"): 1})
+        text = ins.daily(_cards(rows), dates, types)
+        self.assertIn("По будням", text)
+        self.assertIn("9", text)
+
+    def test_heatmap_does_not_call_a_holiday_office_hours(self):
+        rows = [(datetime(2024, 1, 1, 11), 3, "MaxPatrol SIEM", "Высокая") for _ in range(5)]
+        text = ins.heatmap(_cards(rows))
+        self.assertNotIn("рабочие часы", text)
+
+
+class ChartQuestionTest(unittest.TestCase):
+    def test_titles_ask_a_soc_question(self):
+        page = Path("dashboard.py").read_text(encoding="utf-8")
+        self.assertNotIn("Плотность вместо диаграммы рассеяния", page)
+        self.assertIn("Какой вердикт получает карточка?", page)
+        self.assertIn("Какие адреса-источники порождают больше всего карточек?", page)
+        self.assertEqual(
+            ch.HEX_QUESTIONS[ch.HEX_MODES[1]],
+            "В какие часы поток даёт всплески сильнее обычного?",
+        )
+
+    def test_bubble_log_scale_when_durations_span_orders(self):
+        rows = []
+        for rule, solve in (("slow", 100.0), ("mid", 10.0), ("fast", 1.0)):
+            for _ in range(30):
+                rows.append({"rule": rule, "cls": dd.CLS_FP, "solve_min": solve, "crit_ord": 2})
+        fig = ch.fig_bubble(pd.DataFrame(rows))
+        self.assertEqual(fig.layout.xaxis.type, "log")
+        lo, hi = fig.layout.xaxis.range
+        self.assertLess(lo, 0)
+        self.assertGreater(hi, 2)
+
+    def test_bubble_ignores_instant_closes_when_placing_rules(self):
+        rows = [{"rule": "auto", "cls": dd.CLS_FP, "solve_min": 0.0, "crit_ord": 1} for _ in range(40)]
+        rows += [{"rule": "auto", "cls": dd.CLS_FP, "solve_min": 1.0, "crit_ord": 1} for _ in range(20)]
+        rows += [{"rule": "mid", "cls": dd.CLS_FP, "solve_min": 10.0, "crit_ord": 1} for _ in range(30)]
+        rows += [{"rule": "slow", "cls": dd.CLS_FP, "solve_min": 100.0, "crit_ord": 1} for _ in range(30)]
+        fig = ch.fig_bubble(pd.DataFrame(rows))
+        self.assertEqual(fig.layout.xaxis.type, "log")
+        self.assertGreater(fig.layout.xaxis.range[0], -2)
+
+    def test_log_axis_labels_stay_on_their_bubbles(self):
+        # 0,56 минуты попадает внутрь диапазона оси, если подставить минуты вместо log10.
+        # Раньше эта подпись садилась не на свой пузырёк, а две другие уезжали за край.
+        rows = []
+        for rule, solve, cls in (("fast", 0.56, dd.CLS_FP), ("mid", 4.07, dd.CLS_REAL), ("slow", 5.62, dd.CLS_FP)):
+            rows += [{"rule": rule, "cls": cls, "solve_min": solve, "crit_ord": 2} for _ in range(30)]
+        fig = ch.fig_bubble(pd.DataFrame(rows))
+        self.assertEqual(fig.layout.xaxis.type, "log")
+        self.assertEqual(len(fig.layout.annotations), 3)
+        points = {row[0]: x for row, x in zip(fig.data[0].customdata, fig.data[0].x)}
+        lo, hi = fig.layout.xaxis.range
+        for ann in fig.layout.annotations:
+            name = next(rule for rule in points if ann.text.startswith(rule))
+            self.assertAlmostEqual(ann.x, math.log10(points[name]))
+            self.assertGreater(ann.x, lo)
+            self.assertLess(ann.x, hi)
+
+
+class EmptySankeyTest(unittest.TestCase):
+    def test_null_criticality_does_not_divide_by_zero(self):
+        frame = pd.DataFrame({"crit": [pd.NA], "cls": [dd.CLS_FP]})
+        fig = ch.fig_sankey(frame, "Критичность")
+        self.assertEqual(len(fig.data), 0)
+
+
+class InsightWordingTest(unittest.TestCase):
+    def test_fewer_than_ten_rules_are_not_called_ten(self):
+        frame = _cards([(datetime(2024, 1, 1, 10), 1, "MaxPatrol SIEM", "Высокая") for _ in range(3)])
+        frame["rule"] = ["a", "b", "c"]
+        text = ins.top_rules(frame)
+        self.assertIn("3 правила", text)
+        self.assertNotIn("10 правил", text)
+
+    def test_equal_critical_median_is_not_called_faster(self):
+        rows = [(datetime(2024, 1, 1, 10), 1, "MaxPatrol SIEM", "Критическая") for _ in range(30)]
+        rows += [(datetime(2024, 1, 2, 10), 1, "MaxPatrol SIEM", "Низкая") for _ in range(10)]
+        frame = _cards(rows)
+        frame["react_min"] = 10.0
+        text = ins.summary(frame)
+        self.assertIn("та же медиана", text)
+        self.assertNotIn("быстрее", text)
+
+    def test_tiles_match_the_overview_text(self):
+        rows = [(datetime(2024, 1, 1, 10), 1, "MaxPatrol SIEM", "Высокая") for _ in range(6)]
+        rows += [(datetime(2024, 1, 2, 10), 1, "MaxPatrol SIEM", "Высокая") for _ in range(4)]
+        frame = _cards(rows)
+        frame["react_min"] = [0.0] * 6 + [10.0, 10.0, 10.0, 100.0]
+        dates = pd.to_datetime(["2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04"])
+        tiles = ins.kpis(frame, dd.Filters(), dates)
+        text = ins.summary(frame, dates)
+        shown = dd.plotted_minutes(frame["react_min"])
+        self.assertEqual(tiles["kpi_react"], dd.fmt_minutes(shown.median()))
+        self.assertIn(dd.fmt_minutes(shown.quantile(0.9)), tiles["kpi_react_note"])
+        self.assertIn(tiles["kpi_react"], text)
+        self.assertIn(f"за {dd.fmt_int(len(dates))} дн.", text)
+        self.assertIn(f"{dd.fmt_int(len(dates))} дн.", tiles["kpi_n_note"])
+        self.assertIn(f"≈ {dd.fmt_int(len(frame) / len(dates))} в день", tiles["kpi_n_note"])
+        self.assertNotIn(f"{frame['date'].nunique()} дн.", tiles["kpi_n_note"])
+        self.assertNotEqual(tiles["kpi_react"], dd.fmt_minutes(frame["react_min"].median()))
+
+    def test_summary_median_skips_instant_closes(self):
+        rows = [(datetime(2024, 1, 1, 10), 1, "MaxPatrol SIEM", "Критическая") for _ in range(40)]
+        rows += [(datetime(2024, 1, 2, 10), 1, "MaxPatrol SIEM", "Низкая") for _ in range(40)]
+        frame = _cards(rows)
+        frame["react_min"] = [0.0] * 25 + [30.0] * 15 + [10.0] * 40
+        text = ins.summary(frame)
+        self.assertIn("30,0", text)
+        self.assertIn("мгновенно", text)
+        self.assertNotIn("0\u00a0с", text)
+
+    def test_peak_ratio_is_times_greater_not_higher(self):
+        frame = _cards([(datetime(2024, 1, 1, 10), 1, "MaxPatrol SIEM", "Высокая")])
+        text = ins.daily(frame, pd.to_datetime(["2024-01-01"]))
+        self.assertIn("больше среднего", text)
+        self.assertNotIn("выше среднего", text)
+
+    def test_google_range_is_only_142_250_and_142_251(self):
+        src = pd.DataFrame({
+            "src": ["142.250.1.1", "142.251.2.2", "142.250.3.3", "142.252.4.4", "10.0.0.1"],
+            "n_cards": [5, 4, 3, 2, 1],
+        })
+        text = ins.dotplot(src)
+        self.assertIn("3 из подсети", text)
+        self.assertNotIn("4 из подсети", text)
+
+
+class EmptyCriticalityTest(unittest.TestCase):
+    def test_cleared_criticality_returns_no_cards(self):
+        frame = _cards([(datetime(2024, 1, 1, 10), 1, "MaxPatrol SIEM", "Высокая")])
+        store = _store(frame, {pd.Timestamp("2024-01-01"): 1})
+        self.assertEqual(len(dd.apply_filters(store, dd.Filters(crit=[]))), 0)
+        self.assertEqual(len(dd.apply_filters(store, dd.Filters())), 1)
+
+
+class PlottedMedianTest(unittest.TestCase):
+    def test_violin_text_uses_the_median_on_the_chart(self):
+        rows = []
+        for g, slow in (("A", 30.0), ("B", 10.0)):
+            rows += [{"bucket": g, "react_min": 0.0} for _ in range(40)]
+            rows += [{"bucket": g, "react_min": slow} for _ in range(40)]
+        frame = pd.DataFrame(rows)
+        text = ins.violin(frame, "bucket", ["A", "B"])
+        self.assertIn("30,0", text)
+        self.assertIn("10,0", text)
+        self.assertNotIn("15,0", text)
+
+    def test_histogram_line_is_the_plotted_median(self):
+        frame = pd.DataFrame({"react_min": [0.0] * 20 + [30.0] * 20})
+        fig = ch.fig_histogram(frame)
+        labels = [a.text for a in fig.layout.annotations]
+        self.assertTrue(any("30,0" in t for t in labels))
+        self.assertFalse(any("15,0" in t for t in labels))
+
+
+class EmptyDayAverageTest(unittest.TestCase):
+    def test_daily_mean_keeps_the_quiet_day(self):
+        rows = [
+            (datetime(2024, 1, 1, 10), 1, "MaxPatrol SIEM", "Высокая"),
+            (datetime(2024, 1, 1, 11), 1, "MaxPatrol SIEM", "Высокая"),
+            (datetime(2024, 1, 3, 10), 1, "MaxPatrol SIEM", "Высокая"),
+            (datetime(2024, 1, 3, 11), 1, "MaxPatrol SIEM", "Высокая"),
+        ]
+        text = ins.daily(_cards(rows), pd.date_range("2024-01-01", "2024-01-03"))
+        # 4 карточки на 3 дня, включая пустой 2 января → 1, а не 2
+        self.assertIn("В среднем **1**", text)
+
+    def test_heatmap_denominator_includes_a_monday_with_no_cards(self):
+        rows = [
+            (datetime(2024, 1, 1, 10), 1, "MaxPatrol SIEM", "Высокая"),
+            (datetime(2024, 1, 15, 10), 1, "MaxPatrol SIEM", "Высокая"),
+        ]
+        dates = pd.date_range("2024-01-01", "2024-01-15")
+        fig = ch.fig_heatmap_hour(_cards(rows), dates)
+        # Понедельники 1, 8 и 15 января; карточки только в 10:00 двух из них → 2/3
+        self.assertAlmostEqual(float(fig.data[0].z[0][10]), 2 / 3)
+
+
+if __name__ == "__main__":
+    unittest.main()
