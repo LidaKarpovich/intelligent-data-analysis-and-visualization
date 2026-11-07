@@ -708,5 +708,9 @@ def fig_bubble(d: pd.DataFrame, k: int = 20) -> go.Figure:
                            font=dict(size=10, color=INK_2), bgcolor="rgba(255,255,255,0.8)")
     fig.update_xaxes(title_text="Медиана времени решения, мин", showgrid=True, gridcolor=GRID, range=axis_range,
                      type="log" if use_log else "linear")
+    if use_log:
+        # Только 1–2–5 на декаду и подписи в человеческих единицах вместо частокола «5 6 7 8 9 1 2 3…»
+        ticks = [m * 10 ** e for e in range(-2, 7) for m in (1, 2, 5) if xr[0] <= m * 10 ** e <= xr[1]]
+        fig.update_xaxes(tickvals=ticks, ticktext=[dd.fmt_minutes(t) for t in ticks])
     fig.update_yaxes(title_text="Доля карточек «Решён», %", range=yr)
     return base(fig, 480)

@@ -265,5 +265,25 @@ class EmptyDayAverageTest(unittest.TestCase):
         self.assertAlmostEqual(float(fig.data[0].z[0][10]), 2 / 3)
 
 
+class PolishTest(unittest.TestCase):
+    def test_reaction_tile_says_instant_pickups_are_excluded(self):
+        rows = [(datetime(2024, 1, 1, 10), 1, "MaxPatrol SIEM", "Высокая") for _ in range(10)]
+        frame = _cards(rows)
+        frame["react_min"] = [0.0] * 3 + [10.0] * 7
+        tiles = ins.kpis(frame, dd.Filters(), pd.to_datetime(["2024-01-01"]))
+        self.assertIn("без «мгновенных» (30", tiles["kpi_react_note"])
+
+    def test_log_axis_ticks_are_one_two_five(self):
+        rows = []
+        for rule, solve in (("fast", 0.56), ("mid", 4.07), ("slow", 50.0)):
+            rows += [{"rule": rule, "cls": dd.CLS_FP, "solve_min": solve, "crit_ord": 2} for _ in range(30)]
+        fig = ch.fig_bubble(pd.DataFrame(rows))
+        self.assertEqual(fig.layout.xaxis.type, "log")
+        for t in fig.layout.xaxis.tickvals:
+            mantissa = round(t / 10 ** math.floor(math.log10(t)), 6)
+            self.assertIn(mantissa, (1, 2, 5))
+        self.assertIn("1,0\u00a0мин", fig.layout.xaxis.ticktext)
+
+
 if __name__ == "__main__":
     unittest.main()
