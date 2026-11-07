@@ -119,6 +119,8 @@ def kpis(d: pd.DataFrame, f: dd.Filters, dates: pd.DatetimeIndex | None = None) 
     days = span_days(d, dates)
     # Та же медиана, что в «Главном за период» и на гистограмме: без «мгновенных» закрытий.
     react = dd.plotted_minutes(d["react_min"])
+    react_all = pd.to_numeric(d["react_min"], errors="coerce").dropna()
+    instant = dd.instant_share(react_all) if len(react_all) else 0.0
     parts = [f"{dd.fmt_date(d['date'].min())} — {dd.fmt_date(d['date'].max())}"]
     if f.day_type != dd.DAY_TYPES[0]:
         parts.append(f.day_type.lower())
@@ -133,7 +135,8 @@ def kpis(d: pd.DataFrame, f: dd.Filters, dates: pd.DatetimeIndex | None = None) 
         kpi_real=dd.fmt_int(cls.get(dd.CLS_REAL, 0)), kpi_real_note=f"{dd.fmt_pct(cls.get(dd.CLS_REAL, 0) / n)} потока",
         kpi_none=dd.fmt_pct(cls.get(dd.CLS_NONE, 0) / n), kpi_none_note=f"{dd.fmt_int(cls.get(dd.CLS_NONE, 0))} без вердикта",
         kpi_react=dd.fmt_minutes(react.median()) if len(react) else "—",
-        kpi_react_note=f"90 % — быстрее {dd.fmt_minutes(react.quantile(0.9))}" if len(react) else "",
+        kpi_react_note=(f"без «мгновенных» ({dd.fmt_pct(instant, 0)}); 90 % — быстрее "
+                        f"{dd.fmt_minutes(react.quantile(0.9))}") if len(react) else "",
     )
 
 
