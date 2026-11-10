@@ -534,7 +534,9 @@ def fig_waterfall(prev: pd.DataFrame, cur: pd.DataFrame, n_days: int, top: int =
         increasing=dict(marker=dict(color=RED)), decreasing=dict(marker=dict(color=BLUE)),
         totals=dict(marker=dict(color=GRAY)), hovertemplate="%{x}: %{text}<extra></extra>"))
     top_y = max(np.cumsum(vals[:-1]).max(), vals[0], vals[-1])
-    fig.update_yaxes(title_text="Карточек за окно", range=[0, top_y * 1.18], tickformat=",d")
+    fig.update_yaxes(title_text="Карточек за окно", range=[0, max(top_y * 1.18, 5)], tickformat=",d",
+                     # при малых числах шаг не меньше 1, иначе целые подписи повторяются (4, 4, 3, 3…)
+                     dtick=None if top_y > 10 else 1)
     fig.update_xaxes(tickangle=-35, tickfont=dict(color=INK_2, size=11))
     return base(fig, 460)
 
@@ -670,7 +672,9 @@ def fig_bubble(d: pd.DataFrame, k: int = 20) -> go.Figure:
     else:
         xr = [-0.06 * g["solve"].max() - 0.2, g["solve"].max() * 1.12]
         axis_range = xr
-    yr = [-0.08 * g["real"].max() - 1, g["real"].max() * 1.18]
+    # Доля — от 0 до 100 %; при нулевых долях ось не уходит в минус, пузырьки видны целиком
+    y_top = max(g["real"].max() * 1.18, 10.0)
+    yr = [-0.08 * y_top, y_top]
     # Подписи: только самые важные пузырьки и только если подпись ни с чем не пересекается.
     # Координаты переводятся в пиксели для типичной области построения ≈ 620 × 400 px.
     W, H = 620, 400

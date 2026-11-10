@@ -383,7 +383,7 @@ def qq(x: np.ndarray, r2: float, log: bool) -> str:
         r2_log = stats.probplot(np.log1p(x), dist="norm")[1][2] ** 2
         if r2_log > r2 + 0.05:
             txt += (f" После ln(1 + x) R² растёт до {dd.fmt_num(r2_log, 3)} — пороги лучше считать "
-                    "на логарифмической шкале или по процентилям (переключатель справа).")
+                    "на логарифмической шкале или по процентилям (на дашборде — переключатель ln(1 + x)).")
     return txt
 
 
@@ -510,7 +510,8 @@ def waterfall(prev: pd.DataFrame, cur: pd.DataFrame, n_days: int, whole_period: 
         k, v = other.index[0], other.iloc[0]
         txt += f" В обратную сторону сильнее всего изменилась «{k}» ({'+' if v > 0 else '−'}{dd.fmt_int(abs(v))})."
     if whole_period:
-        txt += " Для «Весь период» сравниваются последние 30 дней с предыдущими."
+        txt += (f" Для «Весь период» взято окно «30 дней» из таблицы периодов ({n_days} календарных дн.), "
+                "оно заканчивается в последний день с карточками.")
     return txt
 
 
@@ -571,7 +572,9 @@ def bubble(d: pd.DataFrame) -> str:
         txt += (f" {_n(len(zero), RULES).capitalize()} почти не дают инцидентов (< 1 %), но создают "
                 f"{_n(zero['n'].sum(), CARDS, True)} — они лежат на нижней границе графика: это кандидаты на "
                 "тюнинг или автозакрытие.")
-    rho = stats.spearmanr(g["solve"], g["real"]).statistic
+    # у постоянного ряда (например, ни одного инцидента) корреляция не определена
+    rho = (stats.spearmanr(g["solve"], g["real"]).statistic
+           if g["solve"].nunique() > 1 and g["real"].nunique() > 1 else np.nan)
     if np.isfinite(rho) and abs(rho) >= 0.3:
         txt += (f" Чем выше доля реальных инцидентов, тем дольше разбор (ρ = {dd.fmt_num(rho, 2)}) — настоящие "
                 "инциденты требуют расследования." if rho > 0 else

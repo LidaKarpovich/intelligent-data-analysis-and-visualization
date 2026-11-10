@@ -1,5 +1,6 @@
 """Синтетические проверки логики дашборда. Не требуют parquet и не запускают Taipy."""
 import math
+import re
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -9,6 +10,7 @@ import pandas as pd
 import dashboard_charts as ch
 import dashboard_data as dd
 import dashboard_insights as ins
+import dashboard_kpis as kp
 
 
 def _cards(rows: list[tuple]) -> pd.DataFrame:
@@ -283,6 +285,62 @@ class PolishTest(unittest.TestCase):
             mantissa = round(t / 10 ** math.floor(math.log10(t)), 6)
             self.assertIn(mantissa, (1, 2, 5))
         self.assertIn("1,0\u00a0мин", fig.layout.xaxis.ticktext)
+
+
+class ReviewTest(unittest.TestCase):
+    """Правки по рецензии: текст вынесен в отчёт, числа — в KPI-плитки, окна работают на выборке."""
+
+    def test_period_windows_follow_the_last_day_of_the_data(self):
+        periods = {"7 дней": {pd.Timestamp("2025-09-01"), pd.Timestamp("2025-09-03")}}
+        same = dd.align_periods(periods, pd.Timestamp("2025-09-03 15:00"))
+        self.assertEqual(same, periods)
+        moved = dd.align_periods(periods, pd.Timestamp("2025-05-06 16:11"))
+        self.assertEqual(moved["7 дней"], {pd.Timestamp("2025-05-04"), pd.Timestamp("2025-05-06")})
+
+    def test_waterfall_window_is_not_empty_on_a_sample_that_ends_early(self):
+        rows = [(datetime(2025, 5, d, 10), 1, "MaxPatrol SIEM", "Высокая") for d in range(1, 7)]
+        rows += [(datetime(2025, 4, d, 10), 1, "MaxPatrol SIEM", "Высокая") for d in range(1, 4)]
+        frame = _cards(rows)
+        table = {"30 дней": {pd.Timestamp("2025-08-07") + pd.Timedelta(days=i) for i in range(28)}}
+        store = _store(frame, {}, dd.align_periods(table, frame["date"].max()))
+        prev, cur, n_days = dd.previous_window(store, dd.Filters())
+        self.assertEqual(n_days, 28)
+        self.assertEqual(len(cur), 6)
+        self.assertEqual(len(prev), 3)
+
+    def test_every_tile_in_the_markup_gets_a_value(self):
+        frame = _cards([(datetime(2024, 1, d % 28 + 1, 10), 1, "MaxPatrol SIEM", "Высокая") for d in range(60)])
+        frame["group"] = "L1"
+        hourly = pd.Series(range(30), dtype=float)
+        values = {"overview": kp.overview(frame), "compare": kp.compare(frame), "eda": kp.eda(frame, hourly),
+                  "flows": kp.flows(frame, frame.iloc[:10], frame.iloc[10:], 28, pd.DataFrame(columns=["src"]))}
+        for page, got in values.items():
+            bound = set(re.findall(r"\{(\w+)\}", kp.markup(page)))
+            self.assertTrue(bound, page)
+            self.assertEqual(bound - set(got), set(), page)
+            self.assertEqual(bound - set(kp.empty(page)), set(), page)
+
+    def test_many_false_positives_per_incident_is_flagged(self):
+        frame = _cards([(datetime(2024, 1, 1, 10), 1, "MaxPatrol SIEM", "Высокая")] * 8)
+        frame.loc[:1, "cls"] = dd.CLS_REAL                  # 6 FP на 2 инцидента -> 3,0
+        tiles = kp.overview(frame)
+        self.assertEqual(tiles["ov_ratio_v"], "3,0")
+        self.assertIn("kpi-alert", tiles["ov_ratio_c"])
+        self.assertNotIn("kpi-alert", tiles["ov_n_c"])
+
+    def test_a_tiny_flow_is_not_rounded_down_to_zero(self):
+        rows = [(datetime(2024, 1, 1 + i % 5, 10), 1, "MaxPatrol SIEM", "Высокая") for i in range(50)]
+        rows.append((datetime(2024, 4, 9, 10), 1, "MaxPatrol SIEM", "Высокая"))
+        tiles = kp.overview(_cards(rows), pd.date_range("2024-01-01", "2024-04-09"))
+        self.assertNotIn("→ 0 ", tiles["ov_trend_n"])
+        self.assertNotEqual(tiles["ov_trend_v"], "−100\u00a0%")
+
+    def test_pages_carry_no_prose_and_load_the_css_by_url(self):
+        src = (Path(__file__).parent / "dashboard.py").read_text(encoding="utf-8")
+        for marker in ("class_name=insight", "class_name=hint", "{ins_", "about_page"):
+            self.assertNotIn(marker, src)
+        # Taipy вставляет css_file в <link href>: путь на диске дал бы 404 и страницу без стилей
+        self.assertIn('css_file="dashboard.css"', src)
 
 
 if __name__ == "__main__":

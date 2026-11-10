@@ -2,3 +2,4 @@ task_1/.venv/
 __pycache__/
 *.pyc
 .pytest_cache/
+task_1/data/
