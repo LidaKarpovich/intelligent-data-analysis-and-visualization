@@ -247,6 +247,45 @@ def plotted_minutes(s: pd.Series) -> pd.Series:
     return v[v >= INSTANT_MIN]
 
 
+MIN_GROUP = 30   # меньше 30 карточек — медиана группы слишком неустойчива для сравнения
+
+
+@dataclass
+class CritVsRest:
+    """Медианы взятия в работу: критические карточки против карточек другой критичности."""
+    n_crit: int
+    n_rest: int
+    crit: float = float("nan")
+    rest: float = float("nan")
+
+    @property
+    def comparable(self) -> bool:
+        return self.n_crit >= MIN_GROUP and self.n_rest >= MIN_GROUP
+
+    @property
+    def ratio(self) -> float:
+        return self.crit / self.rest if self.comparable else float("nan")
+
+    @property
+    def slower(self) -> bool:
+        """Критические заметно медленнее: множитель после округления до 0,1 больше 1,0."""
+        return self.comparable and round(self.ratio, 1) > 1.0
+
+
+def crit_vs_rest(d: pd.DataFrame) -> CritVsRest:
+    """Сравнивает критические карточки с остальными, а не со всеми: иначе критические сравниваются
+    сами с собой, и при узком фильтре критичности множитель стремится к 1."""
+    is_crit = (d["crit"] == "Критическая").fillna(False).to_numpy(bool)
+    crit = plotted_minutes(d.loc[is_crit, "react_min"])
+    rest = plotted_minutes(d.loc[~is_crit, "react_min"])
+    out = CritVsRest(len(crit), len(rest))
+    if len(crit):
+        out.crit = float(crit.median())
+    if len(rest):
+        out.rest = float(rest.median())
+    return out
+
+
 def log_minutes(s: pd.Series) -> np.ndarray:
     """Минуты -> log10; пропуски и «мгновенные» (< 0,01 мин) отбрасываем (лог-шкала их не покажет)."""
     v = plotted_minutes(s).to_numpy(float)

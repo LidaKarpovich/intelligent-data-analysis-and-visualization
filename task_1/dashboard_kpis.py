@@ -123,14 +123,23 @@ def overview(d: pd.DataFrame, dates: pd.DatetimeIndex | None = None) -> dict:
     else:
         out.update(_tile("ov_react", DASH))
 
-    crit = dd.plotted_minutes(d.loc[d["crit"] == "Критическая", "react_min"])
-    if len(crit) >= 30 and len(react) and react.median() > 0:
-        mc, ma = crit.median(), react.median()
-        note = (f"медиана; {_times(mc, ma)} к остальным карточкам" if mc > ma
-                else "медиана; не медленнее остальных карточек")
-        out.update(_tile("ov_crit", dd.fmt_minutes(mc), note, alert=mc > ma))
+    cr = dd.crit_vs_rest(d)
+    if cr.n_crit < dd.MIN_GROUP:
+        out.update(_tile("ov_crit", DASH, f"меньше {dd.MIN_GROUP} критических карточек"))
+    elif cr.n_rest < dd.MIN_GROUP:
+        why = ("других карточек в фильтре нет" if cr.n_rest == 0
+               else f"других карточек меньше {dd.MIN_GROUP}")
+        out.update(_tile("ov_crit", dd.fmt_minutes(cr.crit), f"медиана; не с чем сравнить: {why}"))
     else:
-        out.update(_tile("ov_crit", DASH, "меньше 30 критических карточек"))
+        rest = dd.fmt_minutes(cr.rest)
+        if cr.slower:
+            note = f"медиана; {_times(cr.crit, cr.rest)} к остальным ({rest})"
+        elif round(cr.ratio, 1) < 1.0:
+            note = f"медиана; быстрее остальных ({rest})"
+        else:
+            note = f"медиана; как у остальных ({rest})"
+        # красная плитка — только когда множитель на плитке действительно больше ×1,0
+        out.update(_tile("ov_crit", dd.fmt_minutes(cr.crit), note, alert=cr.slower))
 
     trend = _trend(d, dates)
     if trend and trend[0] > 0:

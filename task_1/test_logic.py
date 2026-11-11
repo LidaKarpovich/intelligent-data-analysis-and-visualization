@@ -165,12 +165,12 @@ class InsightWordingTest(unittest.TestCase):
 
     def test_equal_critical_median_is_not_called_faster(self):
         rows = [(datetime(2024, 1, 1, 10), 1, "MaxPatrol SIEM", "Критическая") for _ in range(30)]
-        rows += [(datetime(2024, 1, 2, 10), 1, "MaxPatrol SIEM", "Низкая") for _ in range(10)]
+        rows += [(datetime(2024, 1, 2, 10), 1, "MaxPatrol SIEM", "Низкая") for _ in range(30)]
         frame = _cards(rows)
         frame["react_min"] = 10.0
         text = ins.summary(frame)
-        self.assertIn("та же медиана", text)
-        self.assertNotIn("быстрее", text)
+        self.assertIn("так же, как остальные", text)
+        self.assertNotIn("быстрее остальных", text)
 
     def test_tiles_match_the_overview_text(self):
         rows = [(datetime(2024, 1, 1, 10), 1, "MaxPatrol SIEM", "Высокая") for _ in range(6)]
@@ -341,6 +341,43 @@ class ReviewTest(unittest.TestCase):
             self.assertNotIn(marker, src)
         # Taipy вставляет css_file в <link href>: путь на диске дал бы 404 и страницу без стилей
         self.assertIn('css_file="dashboard.css"', src)
+
+
+def _crit_frame(n_crit: int, crit_min: float, n_rest: int, rest_min: float) -> pd.DataFrame:
+    rows = [(datetime(2024, 1, 1 + i % 28, 10), 1, "MaxPatrol SIEM", "Критическая") for i in range(n_crit)]
+    rows += [(datetime(2024, 1, 1 + i % 28, 11), 1, "MaxPatrol SIEM", "Отсутствует") for i in range(n_rest)]
+    frame = _cards(rows)
+    frame["react_min"] = [crit_min] * n_crit + [rest_min] * n_rest
+    return frame
+
+
+class CritTileTest(unittest.TestCase):
+    """Плитка «Взятие критических карточек»: критические против карточек другой критичности."""
+
+    def test_critical_cards_are_compared_with_the_rest_not_with_themselves(self):
+        # Сценарий из рецензии: критических много и они медленные, остальных немного и они быстрые.
+        # Медиана всех карточек совпала бы с критическими и дала «×1,0»; против остальных — ×12.
+        frame = _crit_frame(2453, 45.5, 40, 3.9)
+        tiles = kp.overview(frame)
+        self.assertEqual(tiles["ov_crit_v"], dd.fmt_minutes(45.5))
+        self.assertIn("×12 к остальным", tiles["ov_crit_n"])
+        self.assertIn("kpi-alert", tiles["ov_crit_c"])
+        self.assertIn("медленнее остальных", ins.summary(frame))
+
+    def test_too_few_other_cards_give_no_alert(self):
+        tiles = kp.overview(_crit_frame(2453, 45.5, 26, 3.9))      # 26 других карточек — как в рецензии
+        self.assertEqual(tiles["ov_crit_v"], dd.fmt_minutes(45.5))
+        self.assertIn("не с чем сравнить", tiles["ov_crit_n"])
+        self.assertNotIn("kpi-alert", tiles["ov_crit_c"])
+        self.assertNotIn("медленнее остальных", ins.summary(_crit_frame(2453, 45.5, 26, 3.9)))
+
+    def test_a_multiplier_that_rounds_to_one_gives_no_alert(self):
+        tiles = kp.overview(_crit_frame(60, 10.4, 60, 10.0))       # ×1,04 -> на плитке было бы «×1,0»
+        self.assertNotIn("kpi-alert", tiles["ov_crit_c"])
+        self.assertIn("как у остальных", tiles["ov_crit_n"])
+        tiles = kp.overview(_crit_frame(60, 5.0, 60, 10.0))
+        self.assertNotIn("kpi-alert", tiles["ov_crit_c"])
+        self.assertIn("быстрее остальных", tiles["ov_crit_n"])
 
 
 if __name__ == "__main__":

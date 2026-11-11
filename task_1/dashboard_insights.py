@@ -182,26 +182,25 @@ def summary(d: pd.DataFrame, dates: pd.DatetimeIndex | None = None) -> str:
 
     react_all = pd.to_numeric(d["react_min"], errors="coerce").dropna()
     react = dd.plotted_minutes(react_all)
-    crit = dd.plotted_minutes(d.loc[d["crit"] == "Критическая", "react_min"])
+    cr = dd.crit_vs_rest(d)
     # Та же медиана, что на гистограмме и скрипке: «мгновенные» закрытия не входят.
     instant = ""
     if len(react_all) and dd.instant_share(react_all) >= 0.001:
         instant = (f" Доля взятых «мгновенно» (< 0,6 с) — {dd.fmt_pct(dd.instant_share(react_all))}; "
                    "в эту медиану они не входят.")
-    if len(react) and len(crit) < 30:
-        out.append(f"Реакция: медиана взятия в работу {_b(_t(react.median()))}, 90 % карточек берутся быстрее "
-                   f"{_t(react.quantile(0.9))}, дольше суток ждут {dd.fmt_pct((react > 1440).mean())}.{instant}")
-    if len(react) and len(crit) >= 30:
-        mc, ma = crit.median(), react.median()
-        if mc == ma:
-            line = (f"Реакция: медиана взятия в работу {_b(_t(ma))}; "
-                    "у критических карточек та же медиана.")
-        else:
-            word = "медленнее" if mc > ma else "быстрее"
-            line = f"Реакция: медиана взятия в работу {_b(_t(ma))}; критические карточки берут {word} — {_b(_t(mc))}"
-            if mc > 0 and ma > 0:
-                line += f" ({_ratio(max(mc, ma), min(mc, ma))})"
-            line += ". Критичность пока не ускоряет реакцию — её стоит учитывать в очереди." if mc > ma else "."
+    if len(react):
+        line = (f"Реакция: медиана взятия в работу {_b(_t(react.median()))}, 90 % карточек берутся быстрее "
+                f"{_t(react.quantile(0.9))}, дольше суток ждут {dd.fmt_pct((react > 1440).mean())}.")
+        if cr.comparable:
+            # критические сравниваются с карточками другой критичности, как на плитке «Обзора»
+            mc, mr = cr.crit, cr.rest
+            if round(cr.ratio, 1) == 1.0:
+                line += f" Критические карточки берут так же, как остальные, — {_b(_t(mc))}."
+            else:
+                word = "медленнее" if cr.slower else "быстрее"
+                line += (f" Критические карточки берут {word} остальных: {_b(_t(mc))} против {_t(mr)} "
+                         f"({_ratio(max(mc, mr), min(mc, mr))})")
+                line += ". Критичность пока не ускоряет реакцию — её стоит учитывать в очереди." if cr.slower else "."
         out.append(line + instant)
     return "\n".join(f"- {s}" for s in out)
 
