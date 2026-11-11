@@ -92,6 +92,22 @@ def _verdict_class(v: pd.Series) -> pd.Series:
     return pd.Series(pd.Categorical(out, categories=CLASS_ORDER), index=v.index)
 
 
+def align_periods(period_dates: dict, data_end) -> dict:
+    """Сдвигает окна «7/30/90/180 дней» так, чтобы они заканчивались в последний день данных.
+
+    Таблица периодов построена для полного датасета и заканчивается 03.09.2025. Выборка
+    из etl.py без --full заканчивается раньше, и без сдвига все окна оказались бы пустыми.
+    На полных данных конец таблицы совпадает с концом данных, и окна не меняются.
+    """
+    ends = [max(v) for v in period_dates.values() if v]
+    if not ends or pd.isna(data_end):
+        return period_dates
+    shift = pd.Timestamp(data_end).normalize() - max(ends)
+    if shift == pd.Timedelta(0):
+        return period_dates
+    return {p: {d + shift for d in v} for p, v in period_dates.items()}
+
+
 def load() -> "Store":
     feats = pd.read_parquet(AGG / "features.parquet", columns=FEATURE_COLS)
     feats["created"] = pd.to_datetime(feats["created"])
@@ -107,6 +123,7 @@ def load() -> "Store":
     per = pd.read_parquet(DATA / "dataframe.parquet")
     per["Дата"] = _as_naive_date(per["Дата"])
     period_dates = {p: set(g["Дата"]) for p, g in per.groupby("Период")}
+    period_dates = align_periods(period_dates, feats["date"].max())
 
     # Календарь: Дата -> Тип дня. Даты вне календаря не считаем рабочими: тип остаётся пустым.
     cal = pd.read_parquet(DATA / "calendar.parquet", columns=["Дата", "Тип дня"])
@@ -198,13 +215,27 @@ def hourly_counts(store: Store, f: Filters) -> pd.Series:
 
 
 def previous_window(store: Store, f: Filters) -> tuple[pd.DataFrame, pd.DataFrame, int]:
-    """Текущее окно (выбранный период) и такое же по длине окно перед ним — для Waterfall.
-    Для «Весь период» сравниваем последние 30 дней с 30 днями до них."""
+    """Текущее окно и такое же по длине окно перед ним — для Waterfall.
+
+    Длина окна — длина выбранного периода; для «Весь период» — 30 дней. Окно заканчивается
+    в последний день с карточками (но не позже конца выбранного периода). Таблица периодов
+    привязана к концу полного датасета, поэтому на выборке из etl.py без --full окна
+    «последние 30 дней» по календарю оказались бы пустыми.
+    """
     days = store.period_dates.get(f.period) or store.period_dates.get("30 дней")
-    start, end = min(days), max(days)
-    n_days = (end - start).days + 1
-    prev_start = start - pd.Timedelta(days=n_days)
+    n_days = (max(days) - min(days)).days + 1 if days else 30
     base = apply_filters(store, Filters(PERIODS[0], f.day_type, f.source, f.crit))
+    empty = base.iloc[0:0]
+    if base.empty:
+        return empty, empty, n_days
+    end = base["date"].max()
+    if f.period in store.period_dates:
+        p_start, p_end = min(store.period_dates[f.period]), max(store.period_dates[f.period])
+        if end < p_start:                          # в выбранном периоде карточек нет вовсе
+            return empty, empty, n_days
+        end = min(end, p_end)
+    start = end - pd.Timedelta(days=n_days - 1)
+    prev_start = start - pd.Timedelta(days=n_days)
     cur = base[(base["date"] >= start) & (base["date"] <= end)]
     prev = base[(base["date"] >= prev_start) & (base["date"] < start)]
     return prev, cur, n_days
@@ -214,6 +245,45 @@ def plotted_minutes(s: pd.Series) -> pd.Series:
     """Те же длительности, что попадают на логарифмическую шкалу: без пропусков и «мгновенных»."""
     v = pd.to_numeric(s, errors="coerce").dropna()
     return v[v >= INSTANT_MIN]
+
+
+MIN_GROUP = 30   # меньше 30 карточек — медиана группы слишком неустойчива для сравнения
+
+
+@dataclass
+class CritVsRest:
+    """Медианы взятия в работу: критические карточки против карточек другой критичности."""
+    n_crit: int
+    n_rest: int
+    crit: float = float("nan")
+    rest: float = float("nan")
+
+    @property
+    def comparable(self) -> bool:
+        return self.n_crit >= MIN_GROUP and self.n_rest >= MIN_GROUP
+
+    @property
+    def ratio(self) -> float:
+        return self.crit / self.rest if self.comparable else float("nan")
+
+    @property
+    def slower(self) -> bool:
+        """Критические заметно медленнее: множитель после округления до 0,1 больше 1,0."""
+        return self.comparable and round(self.ratio, 1) > 1.0
+
+
+def crit_vs_rest(d: pd.DataFrame) -> CritVsRest:
+    """Сравнивает критические карточки с остальными, а не со всеми: иначе критические сравниваются
+    сами с собой, и при узком фильтре критичности множитель стремится к 1."""
+    is_crit = (d["crit"] == "Критическая").fillna(False).to_numpy(bool)
+    crit = plotted_minutes(d.loc[is_crit, "react_min"])
+    rest = plotted_minutes(d.loc[~is_crit, "react_min"])
+    out = CritVsRest(len(crit), len(rest))
+    if len(crit):
+        out.crit = float(crit.median())
+    if len(rest):
+        out.rest = float(rest.median())
+    return out
 
 
 def log_minutes(s: pd.Series) -> np.ndarray:

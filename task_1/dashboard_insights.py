@@ -182,26 +182,25 @@ def summary(d: pd.DataFrame, dates: pd.DatetimeIndex | None = None) -> str:
 
     react_all = pd.to_numeric(d["react_min"], errors="coerce").dropna()
     react = dd.plotted_minutes(react_all)
-    crit = dd.plotted_minutes(d.loc[d["crit"] == "Критическая", "react_min"])
+    cr = dd.crit_vs_rest(d)
     # Та же медиана, что на гистограмме и скрипке: «мгновенные» закрытия не входят.
     instant = ""
     if len(react_all) and dd.instant_share(react_all) >= 0.001:
         instant = (f" Доля взятых «мгновенно» (< 0,6 с) — {dd.fmt_pct(dd.instant_share(react_all))}; "
                    "в эту медиану они не входят.")
-    if len(react) and len(crit) < 30:
-        out.append(f"Реакция: медиана взятия в работу {_b(_t(react.median()))}, 90 % карточек берутся быстрее "
-                   f"{_t(react.quantile(0.9))}, дольше суток ждут {dd.fmt_pct((react > 1440).mean())}.{instant}")
-    if len(react) and len(crit) >= 30:
-        mc, ma = crit.median(), react.median()
-        if mc == ma:
-            line = (f"Реакция: медиана взятия в работу {_b(_t(ma))}; "
-                    "у критических карточек та же медиана.")
-        else:
-            word = "медленнее" if mc > ma else "быстрее"
-            line = f"Реакция: медиана взятия в работу {_b(_t(ma))}; критические карточки берут {word} — {_b(_t(mc))}"
-            if mc > 0 and ma > 0:
-                line += f" ({_ratio(max(mc, ma), min(mc, ma))})"
-            line += ". Критичность пока не ускоряет реакцию — её стоит учитывать в очереди." if mc > ma else "."
+    if len(react):
+        line = (f"Реакция: медиана взятия в работу {_b(_t(react.median()))}, 90 % карточек берутся быстрее "
+                f"{_t(react.quantile(0.9))}, дольше суток ждут {dd.fmt_pct((react > 1440).mean())}.")
+        if cr.comparable:
+            # критические сравниваются с карточками другой критичности, как на плитке «Обзора»
+            mc, mr = cr.crit, cr.rest
+            if round(cr.ratio, 1) == 1.0:
+                line += f" Критические карточки берут так же, как остальные, — {_b(_t(mc))}."
+            else:
+                word = "медленнее" if cr.slower else "быстрее"
+                line += (f" Критические карточки берут {word} остальных: {_b(_t(mc))} против {_t(mr)} "
+                         f"({_ratio(max(mc, mr), min(mc, mr))})")
+                line += ". Критичность пока не ускоряет реакцию — её стоит учитывать в очереди." if cr.slower else "."
         out.append(line + instant)
     return "\n".join(f"- {s}" for s in out)
 
@@ -383,7 +382,7 @@ def qq(x: np.ndarray, r2: float, log: bool) -> str:
         r2_log = stats.probplot(np.log1p(x), dist="norm")[1][2] ** 2
         if r2_log > r2 + 0.05:
             txt += (f" После ln(1 + x) R² растёт до {dd.fmt_num(r2_log, 3)} — пороги лучше считать "
-                    "на логарифмической шкале или по процентилям (переключатель справа).")
+                    "на логарифмической шкале или по процентилям (на дашборде — переключатель ln(1 + x)).")
     return txt
 
 
@@ -510,7 +509,8 @@ def waterfall(prev: pd.DataFrame, cur: pd.DataFrame, n_days: int, whole_period: 
         k, v = other.index[0], other.iloc[0]
         txt += f" В обратную сторону сильнее всего изменилась «{k}» ({'+' if v > 0 else '−'}{dd.fmt_int(abs(v))})."
     if whole_period:
-        txt += " Для «Весь период» сравниваются последние 30 дней с предыдущими."
+        txt += (f" Для «Весь период» взято окно «30 дней» из таблицы периодов ({n_days} календарных дн.), "
+                "оно заканчивается в последний день с карточками.")
     return txt
 
 
@@ -571,7 +571,9 @@ def bubble(d: pd.DataFrame) -> str:
         txt += (f" {_n(len(zero), RULES).capitalize()} почти не дают инцидентов (< 1 %), но создают "
                 f"{_n(zero['n'].sum(), CARDS, True)} — они лежат на нижней границе графика: это кандидаты на "
                 "тюнинг или автозакрытие.")
-    rho = stats.spearmanr(g["solve"], g["real"]).statistic
+    # у постоянного ряда (например, ни одного инцидента) корреляция не определена
+    rho = (stats.spearmanr(g["solve"], g["real"]).statistic
+           if g["solve"].nunique() > 1 and g["real"].nunique() > 1 else np.nan)
     if np.isfinite(rho) and abs(rho) >= 0.3:
         txt += (f" Чем выше доля реальных инцидентов, тем дольше разбор (ρ = {dd.fmt_num(rho, 2)}) — настоящие "
                 "инциденты требуют расследования." if rho > 0 else
