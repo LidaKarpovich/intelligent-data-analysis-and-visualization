@@ -12,7 +12,7 @@ dashboard_charts.py — Plotly-фигуры дашборда «Можно ли �
     (обычный красный рядом с оранжевым проверку не проходит);
   * у каждой серии есть подпись или легенда — цвет не единственный носитель смысла;
   * одна ось значений на графике: разные единицы — отдельные панели.
-WHY — короткий ответ «почему именно этот график» для подписи под заголовком карточки.
+WHY — ответ «почему именно этот график» для таблицы в REPORT.md (на листах дашборда текста нет).
 """
 from __future__ import annotations
 
@@ -185,7 +185,7 @@ def fig_gains(val: pd.DataFrame, oper: pd.DataFrame, thr: float) -> go.Figure:
                 x=[x], y=[y], mode="markers", showlegend=False,
                 marker=dict(size=11, color=color, line=dict(color=SURFACE, width=2)),
                 hovertemplate=f"порог модели ({name}): в приоритете {x:.0%} очереди, найдено {y:.1%} инцидентов<extra></extra>"))
-            fig.add_annotation(x=x, y=y, text=f"{name}: порог τ → {dd.fmt_pct(x, 0)} очереди, {dd.fmt_pct(y, 0)} инцидентов",
+            fig.add_annotation(x=x, y=y, text=f"{name}: {dd.fmt_pct(x, 0)} → {dd.fmt_pct(y, 0)}",
                                showarrow=True, arrowhead=0, arrowcolor=AXIS, axref="x", ayref="y",
                                ax=0.42, ay=0.62 if name == "приёмка" else 0.50, xanchor="left",
                                font=dict(size=11, color=INK_2), bgcolor="rgba(255,255,255,0.85)")
@@ -219,11 +219,7 @@ def fig_sankey(c: dd.Confusion) -> go.Figure:
                   hovertemplate="%{source.label} → %{target.label}<br>%{customdata}: %{value:,} карточек<extra></extra>"),
         textfont=dict(family=FONT, size=12, color=INK),
     ))
-    fig.add_annotation(x=0.5, y=-0.1, xref="paper", yref="paper", showarrow=False, yanchor="top",
-                       text=f"<b style='color:{MISS}'>пропущено {dd.fmt_int(c.fn)} инцидентов</b> · "
-                            f"FP в приоритете: {dd.fmt_int(c.fp)} · отложено верно: {dd.fmt_int(c.tn)}",
-                       font=dict(size=12, color=INK_2))
-    return base(fig, 400, margin=dict(l=8, r=8, t=8, b=56))
+    return base(fig, 380, margin=dict(l=8, r=8, t=8, b=8))
 
 
 def fig_agreement_monthly(mon: pd.DataFrame, sel: pd.Period | None = None) -> go.Figure:
@@ -377,11 +373,6 @@ def fig_score_hist(d: pd.DataFrame, thr: float) -> go.Figure:
                        xanchor="right", yanchor="top", font=dict(size=11, color=MUTED))
     fig.add_annotation(x=np.log10(thr) + 0.05, y=0.97, yref="paper", text="в приоритет →", showarrow=False,
                        xanchor="left", yanchor="top", font=dict(size=11, color=MUTED))
-    near, n_miss = dd.near_threshold_share(lab.assign(pred=lab["proba"] >= thr), thr)
-    if n_miss:
-        fig.add_annotation(x=np.log10(thr) - 0.05, y=0.27, yref="paper", xanchor="right", showarrow=False, align="right",
-                           text=f"<b style='color:{MISS}'>пропущено {n_miss}</b>, из них {near}<br>с оценкой не ниже "
-                                f"половины порога", font=dict(size=11, color=INK_2))
     lo = float(np.floor(np.log10(max(1e-6, np.quantile(lab["proba"], 0.001)))))
     tv = [v for v in [1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 0.1, 1] if np.log10(v) >= lo - 1e-9]
     fig.update_xaxes(tickvals=np.log10(tv), ticktext=[_pct_small(v) for v in tv], row=3, col=1,
@@ -451,8 +442,8 @@ def fig_drift(mon: pd.DataFrame, sel: pd.Period | None = None) -> go.Figure:
     """Три панели с общей осью месяцев: AUC, доля реальных инцидентов в потоке, доля очереди в низком приоритете."""
     if mon.empty:
         return empty()
-    panels = [("auc", "Качество ранжирования (AUC): насколько инциденты оценены выше FP", OPER_COLOR, [0.3, 1.0]),
-              ("enrich", "Карточки с обогащением: заполнены «Вендор» и «Алерт»", INK_2, [0, 1.05]),
+    panels = [("auc", "Качество ранжирования (AUC)", OPER_COLOR, [0.3, 1.0]),
+              ("enrich", "Обогащение: заполнены «Вендор» и «Алерт»", INK_2, [0, 1.05]),
               ("inc_rate", "Доля реальных инцидентов в потоке", ORANGE, None)]
     fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.1,
                         subplot_titles=[p[1] for p in panels])
@@ -469,7 +460,7 @@ def fig_drift(mon: pd.DataFrame, sel: pd.Period | None = None) -> go.Figure:
             fig.update_yaxes(range=rng, tickformat=".0%", nticks=4, row=i, col=1)
         elif col == "auc":
             fig.add_hline(y=0.5, line=dict(color=GRAY_LIGHT, width=1, dash="dot"), row=i, col=1,
-                          annotation_text="0,5 — как монетка", annotation_position="bottom right",
+                          annotation_text="0,5", annotation_position="bottom right",
                           annotation_font=dict(size=10, color=MUTED))
             fig.update_yaxes(range=rng, tickformat=".1f", row=i, col=1)
         else:

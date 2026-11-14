@@ -12,8 +12,8 @@ dashboard.py — дашборд Taipy «Можно ли доверять мод�
     3 · Пропуски       — сколько реальных инцидентов модель пропускает и какие?
     4 · Зоны ошибок    — ошибается случайно или систематически? где именно?
     5 · Можно ли верить — честна ли оценка модели и не устарела ли она?
-Под заголовком каждого графика — короткий ответ «почему выбран именно этот график» (WHY в dashboard_charts.py).
-Выводы с цифрами — в REPORT.md (report.py).
+На листах — только KPI-плитки и графики: важные числа упакованы в плитки, а выводы и ответ
+«почему выбран именно этот график» (WHY в dashboard_charts.py) вынесены в REPORT.md (report.py).
 """
 from __future__ import annotations
 
@@ -42,9 +42,6 @@ seg_metric = METRIC_LOV[0]
 NAV = [("/results", "1 · Итоги"), ("/agreement", "2 · Согласие"), ("/misses", "3 · Пропуски"),
        ("/errors", "4 · Зоны ошибок"), ("/trust", "5 · Можно ли верить")]
 
-# подписи «почему этот график» — переменные, чтобы спецсимволы текста не ломали разметку Taipy
-globals().update({f"why_{k}": v for k, v in ch.WHY.items()})
-
 
 def _filters(s) -> dd.Filters:
     return dd.Filters(period=s.period, org=s.org, crit=list(s.crit_sel or []), policy=s.policy)
@@ -55,10 +52,9 @@ def caption(store: dd.Store, f: dd.Filters, oper: pd.DataFrame) -> str:
     p = store.meta["periods"]
     span = (f"эксплуатация {dd.fmt_date(p['oper'][0])} — {dd.fmt_date(p['oper'][1])}" if f.period == dd.PERIOD_ALL
             else f"эксплуатация: {f.period.lower()}")
-    model = store.meta.get("model", "модель")
-    return (f"{span} · модель курса {model} обучена на окне {dd.fmt_date(p['train'][0])} — {dd.fmt_date(p['train'][1])}, "
-            f"приёмка — её тестовая выборка · порог {dd.fmt_num(dd.threshold_of(store, f), 4)} "
-            f"· {dd.fmt_int(len(oper))} карточек в выборке")
+    return (f"{span} · приёмка: тест окна {dd.fmt_date(p['train'][0])} — {dd.fmt_date(p['train'][1])} "
+            f"· порог {dd.fmt_num(dd.threshold_of(store, f), 4)} · {dd.fmt_int(len(oper))} "
+            f"{dd.plural(len(oper), ('карточка', 'карточки', 'карточек'))}")
 
 
 def view_segments(oper: pd.DataFrame, by: str, metric_label: str) -> dict:
@@ -79,7 +75,7 @@ def compute_all(store: dd.Store, f: dd.Filters, ctl: dict) -> dict:
     out = dict(period_caption=caption(store, f, oper))
     # 1 · Итоги
     out |= dict(fig_waterfall=ch.fig_queue_waterfall(c), fig_gains=ch.fig_gains(val, oper, thr))
-    out |= kp.results(oper, c, cv, tm)
+    out |= kp.results(oper, c, cv, tm, val)
     # 2 · Согласие
     out |= dict(fig_sankey=ch.fig_sankey(c), fig_agree=ch.fig_agreement_monthly(mon, sel))
     out |= kp.agreement(oper, c, cv)
@@ -139,13 +135,14 @@ def on_init(state):
 
 
 # ================================================================ разметка страниц
-def card(title: str, fig: str, why: str, height: int, controls: str = "") -> str:
-    """Карточка графика: вопрос, ответ «почему этот график», при необходимости — переключатели, сам график."""
+def card(title: str, fig: str, height: int, controls: str = "") -> str:
+    """Карточка графика: вопрос-заголовок, при необходимости переключатели, сам график.
+    Обоснование выбора графика — в REPORT.md, а не на листе."""
     n_ctl = controls.count("selector")
     cols = " ".join(["1"] + ["auto"] * n_ctl)
     head = (f"<|layout|columns={cols}|gap=12px|class_name=card-head|\n<|{title}|text|class_name=card-title|>\n\n{controls}\n|>"
             if controls else f"<|{title}|text|class_name=card-title|>")
-    return (f"<|part|class_name=card|\n{head}\n<|{{why_{why}}}|text|class_name=card-why|>\n"
+    return (f"<|part|class_name=card|\n{head}\n"
             f"<|chart|figure={{{fig}}}|plot_config={{PLOT_CONFIG}}|height={height}px|>\n|>")
 
 
@@ -161,7 +158,7 @@ root_page = """
 <|part|class_name=topbar|
 <|layout|columns=1 auto|class_name=topbar-row|
 <|part|class_name=brand|
-<|SOC · можно ли доверять модели-советнику|text|class_name=brand-title|>
+<|SOC · можно ли доверять модели курса lgbm_gate1|text|class_name=brand-title|>
 <|{period_caption}|text|class_name=brand-sub|>
 |>
 <|navbar|lov={NAV}|class_name=nav|>
@@ -188,40 +185,40 @@ root_page = """
 results_page = "\n\n".join([
     question("Что модель дала SOC за период эксплуатации?"),
     kp.markup("results"),
-    two(card("Сколько карточек модель убрала из очереди и чем за это заплатили", "fig_waterfall", "waterfall", 380),
-        card("Сколько очереди надо разобрать, чтобы найти инциденты", "fig_gains", "gains", 380)),
+    two(card("Сколько карточек модель убрала из очереди и чем за это заплатили", "fig_waterfall", 380),
+        card("Сколько очереди надо разобрать, чтобы найти инциденты", "fig_gains", 380)),
 ])
 
 agreement_page = "\n\n".join([
     question("Как часто модель соглашается с вердиктом аналитиков SOC?"),
     kp.markup("agreement"),
-    two(card("Вердикт аналитика → решение модели", "fig_sankey", "sankey", 420),
-        card("Когда модель начала расходиться с аналитиками", "fig_agree", "agree", 420)),
+    two(card("Вердикт аналитика → решение модели", "fig_sankey", 400),
+        card("Когда модель начала расходиться с аналитиками", "fig_agree", 400)),
 ])
 
 misses_page = "\n\n".join([
     question("Сколько реальных инцидентов модель пропускает?"),
     kp.markup("misses"),
-    two(card("Доля пропущенных инцидентов по месяцам", "fig_miss", "miss", 400),
-        card("На каких правилах SIEM модель пропускает инциденты", "fig_missed_rules", "missed_rules", 400),
+    two(card("Доля пропущенных инцидентов по месяцам", "fig_miss", 400),
+        card("На каких правилах SIEM модель пропускает инциденты", "fig_missed_rules", 400),
         cols="3 2"),
 ])
 
 errors_page = "\n\n".join([
     question("Модель ошибается случайно или систематически? Где именно?"),
     kp.markup("errors"),
-    card("В каких срезах ошибок больше среднего", "fig_seg", "segments", 460, controls=(
+    card("В каких срезах ошибок больше среднего", "fig_seg", 440, controls=(
         "<|{seg_by}|selector|lov={SEG_LOV}|dropdown|label=Срез|on_change=on_segments|>\n\n"
         "<|{seg_metric}|selector|lov={METRIC_LOV}|dropdown|label=Ошибка|on_change=on_segments|>")),
-    card("Насколько модель была уверена, когда ошиблась", "fig_hist", "hist", 480),
+    card("Насколько модель была уверена, когда ошиблась", "fig_hist", 480),
 ])
 
 trust_page = "\n\n".join([
     question("Можно ли верить оценке модели и не устарела ли она?"),
     kp.markup("trust"),
-    two(card("Если модель пишет «30 %», сколько на самом деле инцидентов", "fig_cal", "calibration", 400),
-        card("Что изменилось между приёмкой и эксплуатацией", "fig_dumbbell", "dumbbell", 400)),
-    card("Когда модель начала устаревать", "fig_drift", "drift", 480),
+    two(card("Если модель пишет «30 %», сколько на самом деле инцидентов", "fig_cal", 400),
+        card("Что изменилось между приёмкой и эксплуатацией", "fig_dumbbell", 400)),
+    card("Когда модель начала устаревать", "fig_drift", 480),
 ])
 
 pages = {"/": root_page, "results": results_page, "agreement": agreement_page, "misses": misses_page,

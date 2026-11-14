@@ -116,16 +116,6 @@ body, main {
   letter-spacing: -0.01em;
   color: var(--ink);
 }
-/* ответ «почему выбран этот график» — мелко и приглушённо, чтобы не спорить с данными */
-.card-why {
-  display: block;
-  margin: 4px 0 6px;
-  font-size: 12.5px;
-  line-height: 1.4;
-  color: var(--muted);
-  max-width: 920px;
-}
-.card-why::before { content: "Почему этот график: "; font-weight: 600; color: var(--ink-2); }
 .card-title {
   display: block;
   font-size: 16px;
