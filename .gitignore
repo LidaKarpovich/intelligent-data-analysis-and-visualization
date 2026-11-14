@@ -3,3 +3,6 @@ __pycache__/
 *.pyc
 .pytest_cache/
 task_1/data/
+task_2/.venv/
+task_2/data/
+data_1/
