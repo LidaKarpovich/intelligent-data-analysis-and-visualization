@@ -95,10 +95,6 @@ class Store:
         return float(self.meta["threshold"])
 
 
-def policy_label(target: float) -> str:
-    return f"Находить {target * 100:.0f} % инцидентов"
-
-
 def load(agg: Path = AGG) -> Store:
     path = agg / "scored.parquet"
     if not path.exists():
@@ -109,8 +105,9 @@ def load(agg: Path = AGG) -> Store:
 
 
 def _policies(meta: dict) -> dict:
-    pol = {policy_label(float(k)): float(v) for k, v in sorted(meta.get("policies", {}).items())}
-    return pol or {policy_label(meta["target_recall"]): float(meta["threshold"])}
+    """Варианты порога из meta.json: подпись -> порог. Рабочий порог модели — первый."""
+    pol = {str(k): float(v) for k, v in meta.get("policies", {}).items()}
+    return pol or {"Рабочий порог модели": float(meta["threshold"])}
 
 
 def enrich(cards: pd.DataFrame) -> pd.DataFrame:
@@ -120,6 +117,10 @@ def enrich(cards: pd.DataFrame) -> pd.DataFrame:
     d["org"] = d["org"].fillna("не указана")
     d["crit"] = pd.Categorical(d["crit"], categories=CRIT_ORDER, ordered=True)
     d["labeled"] = d["y"] >= 0
+    if "has_vendor" not in d:
+        d["has_vendor"] = d["vendor"].notna() if "vendor" in d else True
+    if "has_alert" not in d:
+        d["has_alert"] = d["has_vendor"]
     return d
 
 
@@ -134,8 +135,13 @@ def org_options(store: Store) -> list[str]:
 
 
 def default_policy(store: Store) -> str:
-    target = policy_label(store.meta["target_recall"])
-    return target if target in store.policies else next(iter(store.policies))
+    label = store.meta.get("default_policy")
+    return label if label in store.policies else next(iter(store.policies))
+
+
+def target_miss(store: Store) -> float:
+    """Доля пропусков на приёмке — уровень, который модель показала при сдаче."""
+    return float(store.meta.get("target_miss", 1 - float(store.meta.get("target_recall", 0.95))))
 
 
 @dataclass
@@ -266,7 +272,8 @@ def monthly(d: pd.DataFrame) -> pd.DataFrame:
         rows.append(dict(month=m, part=g["part"].iloc[0], n=c.n, pos=c.pos, tp=c.tp, fn=c.fn, fp=c.fp, tn=c.tn,
                          recall=c.recall, miss=c.miss, miss_lo=lo, miss_hi=hi, spec=c.specificity,
                          precision=c.precision, low_share=c.low_share, inc_rate=c.pos / c.n if c.n else np.nan,
-                         auc=auc(g["y"], g["proba"]), new_rule=float((g["rule_train_n"] < 100).mean())))
+                         auc=auc(g["y"], g["proba"]), new_rule=float((g["rule_train_n"] < 100).mean()),
+                         enrich=float((g["has_vendor"] & g["has_alert"]).mean())))
     return pd.DataFrame(rows)
 
 
@@ -305,12 +312,19 @@ def _rule_bucket(n: pd.Series) -> pd.Series:
                   labels=["не было в обучении", "редкое: 1–99", "обычное: 100–999", "частое: 1000+"]).astype(str)
 
 
+def _enrich_bucket(d: pd.DataFrame) -> pd.Series:
+    v, a = d["has_vendor"].astype(bool), d["has_alert"].astype(bool)
+    return pd.Series(np.select([v & a, ~v & ~a], ["вендор и алерт есть", "нет ни вендора, ни алерта"], "заполнено частично"),
+                     index=d.index)
+
+
 def _hour_bucket(h: pd.Series) -> pd.Series:
     return pd.cut(h, [-1, 6, 9, 18, 23], labels=["ночь 0–6 ч", "утро 7–9 ч", "день 10–18 ч", "вечер 19–23 ч"]).astype(str)
 
 
 SEGMENTS = {
     "Правило в обучении": lambda d: _rule_bucket(d["rule_train_n"]),
+    "Обогащение (вендор, алерт)": _enrich_bucket,
     "Организация": lambda d: d["org"].astype(str),
     "Критичность": lambda d: d["crit"].astype(str),
     "Категория IRP": lambda d: d["irp"].fillna("не указана").astype(str),
@@ -318,7 +332,7 @@ SEGMENTS = {
     "Правило SIEM": lambda d: d["rule"].fillna("не указано").astype(str),
     "Время суток": lambda d: _hour_bucket(d["hour"]),
 }
-SEGMENT_ORDERED = {"Правило в обучении", "Критичность", "Время суток"}   # у уровней есть естественный порядок
+SEGMENT_ORDERED = {"Правило в обучении", "Критичность", "Время суток", "Обогащение (вендор, алерт)"}   # у уровней есть естественный порядок
 METRICS = {
     "Пропуски реальных инцидентов": "miss",
     "Лишняя работа: FP в приоритете": "fp_rate",
@@ -372,6 +386,8 @@ def _order_for(by: str) -> list[str]:
         return ["не было в обучении", "редкое: 1–99", "обычное: 100–999", "частое: 1000+"]
     if by == "Критичность":
         return CRIT_ORDER
+    if by == "Обогащение (вендор, алерт)":
+        return ["вендор и алерт есть", "заполнено частично", "нет ни вендора, ни алерта"]
     return ["ночь 0–6 ч", "утро 7–9 ч", "день 10–18 ч", "вечер 19–23 ч"]
 
 

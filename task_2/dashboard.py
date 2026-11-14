@@ -27,7 +27,7 @@ from dashboard_charts import PLOT_CONFIG  # noqa: F401  (используетс�
 from dashboard_data import CRIT_ORDER  # noqa: F401
 
 STORE = dd.load()
-TARGET_MISS = 1 - float(STORE.meta["target_recall"])
+TARGET_MISS = dd.target_miss(STORE)          # доля пропусков на приёмке — уровень, с которым модель сдана
 
 # ---------------------------------------------------------------- состояние (значения по умолчанию)
 PERIODS = dd.period_options(STORE)
@@ -55,8 +55,9 @@ def caption(store: dd.Store, f: dd.Filters, oper: pd.DataFrame) -> str:
     p = store.meta["periods"]
     span = (f"эксплуатация {dd.fmt_date(p['oper'][0])} — {dd.fmt_date(p['oper'][1])}" if f.period == dd.PERIOD_ALL
             else f"эксплуатация: {f.period.lower()}")
-    return (f"{span} · приёмка {dd.fmt_date(p['val'][0])} — {dd.fmt_date(p['val'][1])} · "
-            f"модель обучена на карточках до {dd.fmt_date(p['train'][1])} · порог {dd.fmt_pct(dd.threshold_of(store, f))} "
+    model = store.meta.get("model", "модель")
+    return (f"{span} · модель курса {model} обучена на окне {dd.fmt_date(p['train'][0])} — {dd.fmt_date(p['train'][1])}, "
+            f"приёмка — её тестовая выборка · порог {dd.fmt_num(dd.threshold_of(store, f), 4)} "
             f"· {dd.fmt_int(len(oper))} карточек в выборке")
 
 
@@ -73,18 +74,18 @@ def compute_all(store: dd.Store, f: dd.Filters, ctl: dict) -> dict:
     mon_oper = mon[mon["part"] == dd.OPER] if len(mon) else mon
     sel = dd.selected_month(store, f)
     c, cv = dd.confusion(oper), dd.confusion(val)
-    lab, lab_v = oper[oper["y"] >= 0], val[val["y"] >= 0]
+    tm = cv.miss if cv.pos else TARGET_MISS        # уровень приёмки при выбранном пороге
 
     out = dict(period_caption=caption(store, f, oper))
     # 1 · Итоги
     out |= dict(fig_waterfall=ch.fig_queue_waterfall(c), fig_gains=ch.fig_gains(val, oper, thr))
-    out |= kp.results(oper, c, cv, TARGET_MISS)
+    out |= kp.results(oper, c, cv, tm)
     # 2 · Согласие
     out |= dict(fig_sankey=ch.fig_sankey(c), fig_agree=ch.fig_agreement_monthly(mon, sel))
     out |= kp.agreement(oper, c, cv)
     # 3 · Пропуски
-    out |= dict(fig_miss=ch.fig_miss_monthly(mon, TARGET_MISS, sel), fig_missed_rules=ch.fig_missed_rules(oper))
-    out |= kp.misses(oper, c, mon_oper, thr, TARGET_MISS)
+    out |= dict(fig_miss=ch.fig_miss_monthly(mon, tm, sel), fig_missed_rules=ch.fig_missed_rules(oper))
+    out |= kp.misses(oper, c, mon_oper, thr, tm)
     # 4 · Зоны ошибок
     out |= view_segments(oper, ctl["seg_by"], ctl["seg_metric"])
     out |= dict(fig_hist=ch.fig_score_hist(oper, thr))
@@ -173,7 +174,7 @@ root_page = """
 
 <|{crit_sel}|selector|lov={CRIT_ORDER}|dropdown|multiple|label=Критичность|on_change=on_filter|>
 
-<|{policy}|selector|lov={POLICIES}|dropdown|label=Порог модели (выбран на приёмке)|on_change=on_filter|>
+<|{policy}|selector|lov={POLICIES}|dropdown|label=Порог модели: рабочий или «что если»|on_change=on_filter|>
 
 <|Сбросить фильтры|button|on_action=on_reset|class_name=reset|>
 |>
@@ -212,7 +213,7 @@ errors_page = "\n\n".join([
     card("В каких срезах ошибок больше среднего", "fig_seg", "segments", 460, controls=(
         "<|{seg_by}|selector|lov={SEG_LOV}|dropdown|label=Срез|on_change=on_segments|>\n\n"
         "<|{seg_metric}|selector|lov={METRIC_LOV}|dropdown|label=Ошибка|on_change=on_segments|>")),
-    card("Насколько модель была уверена, когда ошиблась", "fig_hist", "hist", 420),
+    card("Насколько модель была уверена, когда ошиблась", "fig_hist", "hist", 480),
 ])
 
 trust_page = "\n\n".join([

@@ -45,7 +45,7 @@ WHY = {
     "agree": "Линии по месяцам показывают, когда модель начала расходиться с аналитиками. Согласие на "
              "инцидентах и на FP разведено: общая доля согласия маскируется численным перевесом FP.",
     "miss": "Доля пропусков по месяцам с 95 %-ным интервалом: в месяце всего несколько сотен инцидентов, "
-            "и без интервала случайный всплеск легко принять за поломку. Пунктир — обещание, данное при приёмке.",
+            "и без интервала случайный всплеск легко принять за поломку. Пунктир — уровень, с которым модель сдана на приёмке.",
     "missed_rules": "Линейчатая диаграмма ранжирует правила по числу пропусков: длинные названия читаются "
                     "по горизонтали, а подпись «N из M» показывает, частая это ошибка или единичная.",
     "segments": "Точечная диаграмма с интервалами сравнивает доли ошибок по срезам компактнее столбцов. "
@@ -57,7 +57,7 @@ WHY = {
     "dumbbell": "Гантели сравнивают одни и те же показатели «на приёмке» и «в работе» на общей шкале 0–100 %: "
                 "длина перемычки — насколько изменилось поведение модели.",
     "drift": "Три панели с общей осью времени вместо одного графика с двумя шкалами: качество ранжирования, "
-             "доля инцидентов в потоке и разгрузка очереди меняются вместе, и это видно по одной вертикали.",
+             "заполненность обогащения и доля инцидентов в потоке меняются вместе, и это видно по одной вертикали.",
 }
 
 
@@ -185,10 +185,10 @@ def fig_gains(val: pd.DataFrame, oper: pd.DataFrame, thr: float) -> go.Figure:
                 x=[x], y=[y], mode="markers", showlegend=False,
                 marker=dict(size=11, color=color, line=dict(color=SURFACE, width=2)),
                 hovertemplate=f"порог модели ({name}): в приоритете {x:.0%} очереди, найдено {y:.1%} инцидентов<extra></extra>"))
-            fig.add_annotation(x=x, y=y, text=f"порог: {dd.fmt_pct(x, 0)} очереди → {dd.fmt_pct(y, 0)}",
-                               showarrow=True, arrowhead=0, arrowcolor=AXIS, ax=-24,
-                               ay=36 if name == "приёмка" else 110, font=dict(size=11, color=INK_2),
-                               xanchor="right", bgcolor="rgba(255,255,255,0.85)")
+            fig.add_annotation(x=x, y=y, text=f"{name}: порог τ → {dd.fmt_pct(x, 0)} очереди, {dd.fmt_pct(y, 0)} инцидентов",
+                               showarrow=True, arrowhead=0, arrowcolor=AXIS, axref="x", ayref="y",
+                               ax=0.42, ay=0.62 if name == "приёмка" else 0.50, xanchor="left",
+                               font=dict(size=11, color=INK_2), bgcolor="rgba(255,255,255,0.85)")
     fig.update_xaxes(title_text="Доля очереди, разобранной сверху вниз по оценке модели", range=[0, 1],
                      **_pct_axis(dtick=0.2))
     fig.update_yaxes(title_text="Доля найденных реальных инцидентов", range=[0, 1.02], **_pct_axis(dtick=0.2))
@@ -219,11 +219,11 @@ def fig_sankey(c: dd.Confusion) -> go.Figure:
                   hovertemplate="%{source.label} → %{target.label}<br>%{customdata}: %{value:,} карточек<extra></extra>"),
         textfont=dict(family=FONT, size=12, color=INK),
     ))
-    fig.add_annotation(x=0.5, y=-0.04, xref="paper", yref="paper", showarrow=False, yanchor="top",
+    fig.add_annotation(x=0.5, y=-0.1, xref="paper", yref="paper", showarrow=False, yanchor="top",
                        text=f"<b style='color:{MISS}'>пропущено {dd.fmt_int(c.fn)} инцидентов</b> · "
                             f"FP в приоритете: {dd.fmt_int(c.fp)} · отложено верно: {dd.fmt_int(c.tn)}",
                        font=dict(size=12, color=INK_2))
-    return base(fig, 400, margin=dict(l=8, r=8, t=8, b=44))
+    return base(fig, 400, margin=dict(l=8, r=8, t=8, b=56))
 
 
 def fig_agreement_monthly(mon: pd.DataFrame, sel: pd.Period | None = None) -> go.Figure:
@@ -258,7 +258,7 @@ def fig_miss_monthly(mon: pd.DataFrame, target_miss: float, sel: pd.Period | Non
     colors = [MISS if o else (VAL_COLOR if p == dd.VAL else OPER_COLOR) for o, p in zip(over, mon["part"])]
     fig = go.Figure()
     fig.add_hline(y=target_miss, line=dict(color=MUTED, width=1.5, dash="dash"),
-                  annotation_text=f"цель приёмки: не больше {dd.fmt_pct(target_miss, 0)}",
+                  annotation_text=f"уровень приёмки: {dd.fmt_pct(target_miss)}",
                   annotation_position="top right", annotation_font=dict(size=11, color=INK_2))
     fig.add_trace(go.Scatter(
         x=x, y=mon["miss"], mode="markers+text", showlegend=False,
@@ -270,7 +270,7 @@ def fig_miss_monthly(mon: pd.DataFrame, target_miss: float, sel: pd.Period | Non
         customdata=np.c_[[dd.month_label(m) for m in mon["month"]], mon["fn"], mon["pos"], mon["miss_lo"], mon["miss_hi"]],
         hovertemplate=("%{customdata[0]}: пропущено %{customdata[1]} из %{customdata[2]} реальных инцидентов "
                        "(%{y:.1%}; 95 %-ный интервал %{customdata[3]:.1%} — %{customdata[4]:.1%})<extra></extra>")))
-    for name, color in [("приёмка", VAL_COLOR), ("эксплуатация", OPER_COLOR), ("хуже цели даже с учётом интервала", MISS)]:
+    for name, color in [("приёмка", VAL_COLOR), ("эксплуатация", OPER_COLOR), ("хуже приёмки даже с учётом интервала", MISS)]:
         fig.add_trace(go.Scatter(x=[None], y=[None], mode="markers", name=name, marker=dict(size=10, color=color)))
     _val_band(fig, mon, sel)
     _month_axis(fig, mon)
@@ -339,13 +339,19 @@ def fig_segments(tbl: pd.DataFrame, metric: str) -> go.Figure:
     return base(fig, max(300, 70 + 34 * len(t)), legend=True, margin=dict(l=8, r=24, t=36, b=8))
 
 
+def _pct_small(v: float) -> str:
+    """0.0001 -> «0,01 %»: столько знаков, сколько нужно маленькой доле."""
+    digits = max(0, -int(np.floor(np.log10(v * 100)))) if v < 0.01 else 0
+    return dd.fmt_pct(v, digits)
+
+
 def fig_score_hist(d: pd.DataFrame, thr: float) -> go.Figure:
     """Распределение оценок модели (лог-шкала) по вердиктам аналитика; пропуски — отдельным цветом."""
     lab = d[d["y"] >= 0]
     if lab.empty:
         return empty()
-    edges = np.logspace(-3, 0, 43)
-    lp = np.log10(np.clip(lab["proba"].to_numpy(), 1e-3, 1))
+    edges = np.logspace(-6, 0, 61)              # оценки бустинга уходят до миллионных долей
+    lp = np.log10(np.clip(lab["proba"].to_numpy(), 1e-6, 1))
     centers = (np.log10(edges[:-1]) + np.log10(edges[1:])) / 2
     y = lab["y"].to_numpy()
     groups = [
@@ -353,16 +359,17 @@ def fig_score_hist(d: pd.DataFrame, thr: float) -> go.Figure:
         ("реальный инцидент: найден", (y == 1) & (lab["proba"].to_numpy() >= thr), ORANGE),
         ("реальный инцидент: пропущен", (y == 1) & (lab["proba"].to_numpy() < thr), MISS),
     ]
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08, row_heights=[0.5, 0.5])
+    # три панели со своими шкалами: иначе редкие пропуски теряются рядом с тысячами найденных инцидентов
+    fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.07, row_heights=[0.36, 0.32, 0.32])
     for i, (name, m, color) in enumerate(groups):
         cnt, _ = np.histogram(lp[m], bins=np.log10(edges))
-        row = 1 if i == 0 else 2
+        row = i + 1
         fig.add_trace(go.Bar(x=centers, y=cnt, name=name, marker=dict(color=color, line=dict(width=0)),
                              width=(np.log10(edges[1]) - np.log10(edges[0])) * 0.9,
                              customdata=np.c_[edges[:-1], edges[1:]],
                              hovertemplate=name + ": %{y:,} карточек с оценкой %{customdata[0]:.1%} — %{customdata[1]:.1%}<extra></extra>"),
                       row=row, col=1)
-    for row in (1, 2):
+    for row in (1, 2, 3):
         fig.add_vline(x=np.log10(thr), line=dict(color=INK_2, width=1.5, dash="dash"), row=row, col=1)
     fig.add_annotation(x=np.log10(thr), y=1, yref="paper", text=f"порог {dd.fmt_pct(thr)}", showarrow=False,
                        xanchor="left", xshift=6, yanchor="bottom", font=dict(size=11, color=INK_2))
@@ -372,17 +379,18 @@ def fig_score_hist(d: pd.DataFrame, thr: float) -> go.Figure:
                        xanchor="left", yanchor="top", font=dict(size=11, color=MUTED))
     near, n_miss = dd.near_threshold_share(lab.assign(pred=lab["proba"] >= thr), thr)
     if n_miss:
-        fig.add_annotation(x=np.log10(thr) - 0.05, y=0.3, yref="paper", xanchor="right", showarrow=False, align="right",
+        fig.add_annotation(x=np.log10(thr) - 0.05, y=0.27, yref="paper", xanchor="right", showarrow=False, align="right",
                            text=f"<b style='color:{MISS}'>пропущено {n_miss}</b>, из них {near}<br>с оценкой не ниже "
                                 f"половины порога", font=dict(size=11, color=INK_2))
-    lo = float(np.floor(np.log10(max(1e-3, np.quantile(lab["proba"], 0.001))) * 2) / 2)
-    tv = [v for v in [0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1] if np.log10(v) >= lo - 1e-9]
-    fig.update_xaxes(tickvals=np.log10(tv), ticktext=[dd.fmt_pct(v, 1 if v < 0.01 else 0) for v in tv], row=2, col=1,
+    lo = float(np.floor(np.log10(max(1e-6, np.quantile(lab["proba"], 0.001)))))
+    tv = [v for v in [1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 0.1, 1] if np.log10(v) >= lo - 1e-9]
+    fig.update_xaxes(tickvals=np.log10(tv), ticktext=[_pct_small(v) for v in tv], row=3, col=1,
                      title_text="Оценка модели: вероятность реального инцидента (логарифмическая шкала)")
     fig.update_xaxes(range=[lo, 0], showline=True, linecolor=AXIS)
     fig.update_yaxes(title_text="FP", tickformat=",d", row=1, col=1)
-    fig.update_yaxes(title_text="Инциденты", tickformat=",d", row=2, col=1)
-    return base(fig, 400, legend=True, barmode="overlay", margin=dict(l=8, r=16, t=36, b=8))
+    fig.update_yaxes(title_text="Найдены", tickformat=",d", row=2, col=1)
+    fig.update_yaxes(title_text="Пропущены", tickformat=",d", row=3, col=1)
+    return base(fig, 460, legend=True, barmode="overlay", margin=dict(l=8, r=16, t=36, b=8))
 
 
 # ================================================================ 5. ДОВЕРИЕ К ОЦЕНКЕ
@@ -444,8 +452,8 @@ def fig_drift(mon: pd.DataFrame, sel: pd.Period | None = None) -> go.Figure:
     if mon.empty:
         return empty()
     panels = [("auc", "Качество ранжирования (AUC): насколько инциденты оценены выше FP", OPER_COLOR, [0.3, 1.0]),
-              ("inc_rate", "Доля реальных инцидентов в потоке", ORANGE, None),
-              ("low_share", "Очередь, которую модель отложила (низкий приоритет)", INK_2, None)]
+              ("enrich", "Карточки с обогащением: заполнены «Вендор» и «Алерт»", INK_2, [0, 1.05]),
+              ("inc_rate", "Доля реальных инцидентов в потоке", ORANGE, None)]
     fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.1,
                         subplot_titles=[p[1] for p in panels])
     x = [str(m) for m in mon["month"]]
@@ -457,7 +465,9 @@ def fig_drift(mon: pd.DataFrame, sel: pd.Period | None = None) -> go.Figure:
                                  hovertemplate="%{customdata}: " + title.lower() + " %{y:.1%}<extra></extra>"
                                  if col != "auc" else "%{customdata}: AUC %{y:.2f}<extra></extra>"),
                       row=i, col=1)
-        if col == "auc":
+        if col == "enrich":
+            fig.update_yaxes(range=rng, tickformat=".0%", nticks=4, row=i, col=1)
+        elif col == "auc":
             fig.add_hline(y=0.5, line=dict(color=GRAY_LIGHT, width=1, dash="dot"), row=i, col=1,
                           annotation_text="0,5 — как монетка", annotation_position="bottom right",
                           annotation_font=dict(size=10, color=MUTED))

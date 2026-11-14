@@ -28,13 +28,15 @@ def _cards(n_pos=40, n_neg=400, seed=0, part=dd.OPER, month="2025-06") -> pd.Dat
         "inc_type": "type-a", "irp": rng.choice(["irp-a", "irp-b"], len(y)),
         "crit": rng.choice(dd.CRIT_ORDER[:3], len(y)), "org": rng.choice(["Орг-1", "Орг-2", None], len(y)),
         "vendor": "v", "siem": "s", "group": "L1", "hour": created.hour, "dow": created.dayofweek,
-        "rule_train_n": rng.choice([0, 50, 500, 5000], len(y)), "cmd_len": np.nan, "attack_dur_min": np.nan,
+        "rule_train_n": rng.choice([0, 50, 500, 5000], len(y)),
+        "has_vendor": rng.random(len(y)) < 0.6, "has_alert": rng.random(len(y)) < 0.6,
     })
 
 
 def _store(frames: list[pd.DataFrame], thr: float = 0.5) -> dd.Store:
     cards = dd.enrich(pd.concat(frames, ignore_index=True))
-    meta = {"threshold": thr, "target_recall": 0.95, "policies": {"0.95": thr, "0.99": thr / 2},
+    meta = {"threshold": thr, "target_miss": 0.05, "default_policy": "Рабочий порог",
+            "policies": {"Рабочий порог": thr, "Находить 99 %": thr / 2},
             "periods": {"train": ["2024-01-01", "2025-02-28"], "val": ["2025-03-01", "2025-04-30"],
                         "oper": ["2025-05-01", "2025-11-20"]}, "pos_rate_train": 0.2}
     return dd.Store(cards=cards, meta=meta, policies=dd._policies(meta))
@@ -106,24 +108,38 @@ def _load_prepare():
 
 
 class Parsing(unittest.TestCase):
-    def test_items_and_name_of(self):
+    def test_first_item_and_name_of(self):
         prep = _load_prepare()
         if prep is None:
             self.skipTest("prepare.py требует pyarrow")
-        self.assertEqual(prep.items('["a", "b"]'), ["a", "b"])
-        self.assertEqual(prep.items('[""]'), [])
-        self.assertEqual(prep.items("plain"), ["plain"])
-        self.assertEqual(prep.items(None), [])
-        self.assertEqual(prep.items(float("nan")), [])
-        self.assertEqual(prep.name_of('{"name": "L1"}'), "L1")
+        self.assertEqual(prep.first_item('["Общий Инцидент ИБ"]'), "Общий Инцидент ИБ")
+        self.assertEqual(prep.first_item('["Ankey SIEM NG", "x"]'), "Ankey SIEM NG")
+        self.assertEqual(prep.first_item("Средняя"), "Средняя")
+        self.assertIsNone(prep.first_item("[]"))
+        self.assertIsNone(prep.first_item(None))
         self.assertEqual(prep.name_of('{"name": "ИАиВД", "address": null}'), "ИАиВД")
 
-    def test_time_split(self):
-        prep = _load_prepare()
-        if prep is None:
-            self.skipTest("prepare.py требует pyarrow")
-        s = pd.Series(pd.to_datetime(["2025-02-28 23:59", "2025-03-01 00:00", "2025-04-30 23:00", "2025-05-01 00:00"]))
-        self.assertEqual(prep.assign_part(s).tolist(), ["train", "val", "val", "oper"])
+
+class CourseModelCompat(unittest.TestCase):
+    """Вычисление деревьев LightGBM на numpy и поведение pandas 2 — без пакета курса."""
+    TREE = "\n".join([
+        "tree", "version=v4", "num_class=1", "objective=binary sigmoid:1", "",
+        "Tree=0", "num_leaves=3", "num_cat=0", "split_feature=0 1", "threshold=0.5 2.5",
+        # узел 0: x0 <= 0.5, пропуск (NaN) идёт влево; узел 1: x1 <= 2.5, пропуск -> вправо
+        "decision_type=10 8", "left_child=1 -2", "right_child=-1 -3", "leaf_value=1.0 -1.0 0.25", "shrinkage=1", "",
+        "Tree=1", "num_leaves=1", "num_cat=0", "leaf_value=0.5", "shrinkage=1", "", "end of trees", ""])
+
+    def test_numpy_booster(self):
+        from course_model import NumpyBooster
+        m = NumpyBooster(self.TREE)
+        X = np.array([[0.0, 1.0], [0.0, 3.0], [1.0, 0.0], [np.nan, 1.0], [0.0, np.nan]])
+        raw = np.array([-1.0, 0.25, 1.0, -1.0, 0.25]) + 0.5        # лист + второе дерево-константа
+        np.testing.assert_allclose(m.predict_proba(X)[:, 1], 1 / (1 + np.exp(-raw)))
+
+    def test_to_str_keeps_none_like_pandas2(self):
+        from course_model import _to_str_pandas2
+        out = _to_str_pandas2(pd.DataFrame({"a": ["x", None, np.nan, 5]}))
+        self.assertEqual(out.ravel().tolist(), ["x", None, None, "5"])
 
 
 class Filters(unittest.TestCase):
@@ -139,8 +155,9 @@ class Filters(unittest.TestCase):
         self.assertIn("2025-03", set(both["month"].astype(str)))       # приёмка остаётся для сравнения
 
     def test_policy_changes_threshold(self):
-        f95 = dd.Filters(policy=dd.policy_label(0.95))
-        f99 = dd.Filters(policy=dd.policy_label(0.99))
+        f95 = dd.Filters(policy="Рабочий порог")
+        f99 = dd.Filters(policy="Находить 99 %")
+        self.assertEqual(dd.default_policy(self.store), "Рабочий порог")
         self.assertGreater(dd.threshold_of(self.store, f95), dd.threshold_of(self.store, f99))
         self.assertGreaterEqual(dd.confusion(dd.apply_filters(self.store, f99)).recall,
                                 dd.confusion(dd.apply_filters(self.store, f95)).recall)
@@ -172,6 +189,11 @@ class Segments(unittest.TestCase):
         d["crit"] = pd.Categorical(["Средняя"] * len(d), categories=dd.CRIT_ORDER)
         segs = set(dd.segment_table(d, "Организация", "miss")["seg"])
         self.assertEqual(segs, {"A"})                                  # «прочие» = 10 < MIN_POS -> скрыто
+
+    def test_enrichment_buckets(self):
+        d = pd.DataFrame({"has_vendor": [True, False, True, False], "has_alert": [True, False, False, True]})
+        self.assertEqual(dd._enrich_bucket(d).tolist(),
+                         ["вендор и алерт есть", "нет ни вендора, ни алерта", "заполнено частично", "заполнено частично"])
 
     def test_near_threshold(self):
         d = pd.DataFrame({"y": [1, 1, 1, 0], "proba": [0.09, 0.03, 0.2, 0.01]})

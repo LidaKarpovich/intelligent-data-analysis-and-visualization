@@ -1,113 +1,67 @@
 """
-prepare.py — сырой iavd_ml_dataset.parquet -> признаки -> модель -> оценки для дашборда.
+prepare.py — оценки модели курса `lgbm_gate1__v001` для дашборда «Можно ли доверять модели».
 
 Запуск из папки task_2:
-    python prepare.py                       # ищет датасет в ../data_1, data_1 и data
-    python prepare.py --path путь/к/файлу.parquet
+    python prepare.py                                   # ищет датасет и пакет модели сам
+    python prepare.py --path путь/к/iavd_ml_dataset.parquet --course-dir путь/к/IAVD_3.7_ML_team
 
-Схема эксперимента («модель в эксплуатации»):
-    обучение      карточки до 01.03.2025          — модель учится на вердиктах аналитиков
-    приёмка       01.03.2025 — 30.04.2025          — выбираем порог: модель должна находить
-                                                     не меньше TARGET_RECALL реальных инцидентов
-    эксплуатация  с 01.05.2025 до конца выгрузки   — модель с зафиксированным порогом сортирует
-                                                     очередь; её оценки сверяем с вердиктами SOC
+Что считаем (всё — моделью курса, порог τ = 0,0193 не меняем):
+    приёмка       тестовый сплит окна обучения 01.06–31.08.2025 — карточки, на которых курс
+                  опубликовал метрики (TP 390 / FP 107 / FN 24 / TN 2652). Сплит воспроизводится
+                  кодом курса (course_ml.train.make_split, seed 42), метрики сверяются с опубликованными;
+    эксплуатация  все карточки с 01.09.2025 до конца выгрузки — их модель не видела.
 
-Признаки — только поля категории A словаря iavd_incidents_ml_field_dictionary.md (известны в момент
-создания карточки): правило, критичность, SLA, категория, поля события, учётки и хосты, командная строка.
-Поля категории C (вердикт, решение, комментарии, меры, флаги процесса, времена обработки) — утечка ответа.
-«Теги» и «Описание инцидента» словарь помечает «A→C?» (могут дополняться при разборе) — тоже не берём.
+Область модели та же, что при обучении: есть правило корреляции SIEM, вендор не «Ручной ввод».
+Модель оценивает и карточки без вердикта, но метрики считаются только по «Решён» / «False Positive».
 
-Что получается в data/agg/:
+Результат в data/agg/:
     scored.parquet  — карточки приёмки и эксплуатации: вердикт, оценка модели, срезы для анализа ошибок
-    meta.json       — периоды, порог, метрики приёмки, список признаков
+    meta.json       — периоды, порог и варианты порога, метрики приёмки, сверка с эталоном
 """
 from __future__ import annotations
 
 import argparse
 import json
-import math
-from collections import Counter
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
-from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.metrics import average_precision_score, roc_auc_score
+
+from course_model import CourseAdvisor, find_course_dir
 
 BASE = Path(__file__).resolve().parent
 AGG_DIR = BASE / "data" / "agg"
 RAW_NAME = "iavd_ml_dataset.parquet"
 SEARCH_DIRS = [BASE / "data", BASE / "data_1", BASE.parent / "data_1", BASE.parent / "data"]
 
-TZ = "Europe/Moscow"
-TRAIN_END = pd.Timestamp("2025-03-01")      # начало приёмки
-OPER_START = pd.Timestamp("2025-05-01")     # начало эксплуатации
-TARGET_RECALL = 0.95                        # на приёмке модель должна находить ≥ 95 % реальных инцидентов
-POLICIES = [0.90, 0.95, 0.99]               # варианты порога для «что если» на дашборде
-SEED = 42
+WINDOW = (pd.Timestamp("2025-06-01", tz="UTC"), pd.Timestamp("2025-09-01", tz="UTC"))   # окно обучения
+OPER_START = WINDOW[1]
+LOCAL_TZ = "Europe/Moscow"                       # только для часа суток в срезах
+PUBLISHED_TEST = dict(tp=390, fp=107, fn=24, tn=2652)                             # model_card.md
+LABELS = {"Решён": 1, "False Positive": 0}
 
-# 1 = «Решён» (реальный инцидент), 0 = «False Positive», остальные вердикты в метрики не входят
-LABEL_MAP = {"False Positive": 0, "Решен": 1}
-CRIT = {"Низкая": 1, "Средняя": 2, "Высокая": 3, "Критическая": 4}
-CRIT_SRC = {"Low": 1, "Medium": 2, "High": 3}
-
-RAW_COLS = [
-    "EntityId", "Дата создания", "Вердикт", "Критичность", "Критичность инцидента в источнике",
-    "Тип инцидента", "Источник инцидента", "Наименование", "Пиктограмма IRP", "Организация",
-    "Конвейер SIEM", "Вендор из сием", "categoryHigh", "categoryLow", "categoryMain", "object",
-    "processName", "Имя родителя процесса", "commandName", "Привилегии аккаунта", "CMDLINE",
-    "Значение Инцидента (группировка)", "Правило корреляции SIEM", "Алерт",
-    "src", "dst", "FilePath", "Время первого события", "Время последнего события", "Группа устранения",
-    "SLA по устранению Атаки", "SLA по взятию в работу Атаки", "Количество инцидентов", "Типы угроз",
-    "Список вредоносных команд", "suser", "duser", "Hostname Цели", "Hostname атакующего",
-]
-
-# новое имя -> (исходная колонка, сколько самых частых значений оставить; остальное -> other)
-CATEGORICAL = {
-    "rule": ("Наименование", 80),
-    "inc_type": ("Тип инцидента", 40),
-    "siem": ("Источник инцидента", 4),
-    "irp": ("Пиктограмма IRP", 15),
-    "org": ("Организация", 8),
-    "pipeline": ("Конвейер SIEM", 10),
-    "vendor": ("Вендор из сием", 12),
-    "cat_main": ("categoryMain", 25),
-    "cat_high": ("categoryHigh", 25),
-    "cat_low": ("categoryLow", 25),
-    "obj": ("object", 20),
-    "proc": ("processName", 30),
-    "proc_parent": ("Имя родителя процесса", 30),
-    "cmd_name": ("commandName", 30),
-    "priv": ("Привилегии аккаунта", 6),
-}
-NUM = ["crit_ord", "crit_src_ord", "hour", "dow", "attack_dur_min", "n_rules", "n_src", "n_dst",
-       "n_values", "n_alerts", "n_files", "cmd_len", "cmd_entropy", "cmd_n", "cmd_enc",
-       "sla_fix_min", "sla_take_min", "n_incidents", "n_threats", "n_malcmd",
-       "n_suser", "n_duser", "n_host_dst", "n_host_src", "suser_freq", "host_dst_freq"]
-EVENT_MIN = pd.Timestamp("2024-04-12", tz="UTC")   # события раньше начала выгрузки — выбросы (словарь, раздел 8)
-FREQ = {"suser_freq": "suser1", "host_dst_freq": "host_dst1"}   # частотное кодирование по обучению
-PARAMS = dict(max_iter=300, learning_rate=0.05, max_leaf_nodes=31, min_samples_leaf=40,
-              l2_regularization=1.0, early_stopping=False, random_state=SEED)
+# поля для срезов на дашборде (сами в модель не идут, кроме тех, что модель и так видит)
+EXTRA_COLS = ["EntityId", "Создан", "Вердикт", "Наименование", "Тип инцидента", "Пиктограмма IRP",
+              "Критичность", "Организация", "Вендор из сием", "Источник инцидента", "Группа устранения",
+              "Алерт", "Значение Инцидента (группировка)", "Правило корреляции SIEM"]
 
 
-# ---------------------------------------------------------------- разбор полей
-def items(x) -> list[str]:
-    """Мультизначное поле: JSON-список строк ('["a", "b"]') -> list; одиночная строка -> [строка]."""
-    if not isinstance(x, str) or not x:
-        return []
-    s = x.strip()
-    if s.startswith("["):
-        try:
-            v = json.loads(s, strict=False)    # strict=False: в командных строках бывают управляющие символы
-            return [str(i) for i in v if i not in (None, "")] if isinstance(v, list) else [str(v)]
-        except ValueError:
-            pass
-    return [s]
+def find_raw(path: str | None) -> Path:
+    if path:
+        p = Path(path).expanduser()
+        if not p.exists():
+            raise SystemExit(f"Нет файла {p}")
+        return p
+    for d in SEARCH_DIRS:
+        if (d / RAW_NAME).exists():
+            return d / RAW_NAME
+    raise SystemExit(f"Не нашёл {RAW_NAME} в: " + ", ".join(str(d) for d in SEARCH_DIRS))
 
 
 def name_of(x) -> str | None:
-    """JSON-объект с ключом name ('{"name": "L1"}') -> 'L1'; прочее -> как есть."""
+    """JSON-объект с ключом name ('{"name": "L1"}') -> 'L1'."""
     if not isinstance(x, str) or not x:
         return None
     if x.startswith("{"):
@@ -118,138 +72,64 @@ def name_of(x) -> str | None:
     return x
 
 
-def n_entities(xs: list[str]) -> int:
-    """Число сущностей: элементы списка, внутри которых значения ещё разделены «|»."""
-    return sum(len([p for p in x.split("|") if p]) for x in xs)
+def first_item(x) -> str | None:
+    """Поле-список в формате JSON ('["Общий Инцидент ИБ"]') -> первый элемент; строка -> как есть."""
+    if not isinstance(x, str) or not x:
+        return None
+    if x.startswith("["):
+        try:
+            items = json.loads(x, strict=False)
+            return str(items[0]) if items else None
+        except (ValueError, IndexError):
+            return x
+    return x
 
 
-def first_entity(xs: list[str]) -> str | None:
-    for x in xs:
-        for p in x.split("|"):
-            if p:
-                return p.strip().lower()
-    return None
+def needed_columns(advisor: CourseAdvisor, available: list[str]) -> list[str]:
+    cfg = advisor.cfg
+    cols = set(EXTRA_COLS) | set(advisor.data_mod.LIST_LEN_SOURCE)
+    for group in cfg["features"]["fields"].values():
+        cols |= set(group)
+    for key in ("column", "first_event", "last_event"):
+        cols.add(cfg["dataset"]["time"][key])
+    cols |= {"suser", "duser", "ProcessPath", "Список вредоносных команд", cfg["dataset"]["target"]["column"]}
+    return [c for c in available if c in cols]                       # порядок как в файле
 
 
-def shannon(text) -> float:
-    """Энтропия Шеннона строки (бит/символ); NaN для пустых."""
-    if not isinstance(text, str) or not text:
-        return np.nan
-    text = text[:5000]
-    n = len(text)
-    return -sum(c / n * math.log2(c / n) for c in Counter(text).values())
-
-
-def to_utc(s: pd.Series) -> pd.Series:
-    return pd.to_datetime(s, utc=True, errors="coerce", format="ISO8601")
-
-
-def top_k(s: pd.Series, keep: list[str]) -> pd.Series:
-    out = s.where(s.isin(keep), "other")
-    return out.where(s.notna(), "missing")
-
-
-# ---------------------------------------------------------------- признаки одного куска
-def build_features(df: pd.DataFrame) -> pd.DataFrame:
-    out = pd.DataFrame(index=df.index)
-    out["id"] = pd.to_numeric(df["EntityId"], errors="coerce").astype("int64")
-    created = pd.to_datetime(df["Дата создания"], utc=True).dt.tz_convert(TZ)
-    out["created"] = created.dt.tz_localize(None)
-    out["hour"] = created.dt.hour.astype("int8")
-    out["dow"] = created.dt.dayofweek.astype("int8")
-
-    out["verdict"] = df["Вердикт"]
-    v = df["Вердикт"].str.replace("ё", "е", regex=False)
-    out["y"] = v.map(LABEL_MAP).fillna(-1).astype("int8")
-
-    out["crit"] = df["Критичность"]
-    out["crit_ord"] = df["Критичность"].map(CRIT)
-    out["crit_src_ord"] = df["Критичность инцидента в источнике"].map(CRIT_SRC)
-
-    lists = {c: df[c].map(items) for c in ["Правило корреляции SIEM", "src", "dst", "Значение Инцидента (группировка)",
-                                           "Алерт", "FilePath", "CMDLINE", "Типы угроз", "Список вредоносных команд",
-                                           "suser", "duser", "Hostname Цели", "Hostname атакующего"]}
-    out["n_rules"] = lists["Правило корреляции SIEM"].map(len).astype("int16")
-    out["n_src"] = lists["src"].map(len).astype("int16")
-    out["n_dst"] = lists["dst"].map(len).astype("int16")
-    out["n_values"] = lists["Значение Инцидента (группировка)"].map(len).astype("int16")
-    out["n_alerts"] = lists["Алерт"].map(len).astype("int16")
-    out["n_files"] = lists["FilePath"].map(len).astype("int16")
-    out["n_threats"] = lists["Типы угроз"].map(len).astype("int16")
-    out["n_malcmd"] = lists["Список вредоносных команд"].map(len).astype("int16")
-    out["n_suser"] = lists["suser"].map(n_entities).astype("int16")
-    out["n_duser"] = lists["duser"].map(n_entities).astype("int16")
-    out["n_host_dst"] = lists["Hostname Цели"].map(n_entities).astype("int16")
-    out["n_host_src"] = lists["Hostname атакующего"].map(n_entities).astype("int16")
-    out["suser1"] = lists["suser"].map(first_entity)
-    out["host_dst1"] = lists["Hostname Цели"].map(first_entity)
-    out["sla_fix_min"] = pd.to_numeric(df["SLA по устранению Атаки"], errors="coerce") / 60000     # мс -> мин
-    out["sla_take_min"] = pd.to_numeric(df["SLA по взятию в работу Атаки"], errors="coerce") / 60000
-    out["n_incidents"] = pd.to_numeric(df["Количество инцидентов"], errors="coerce")
-
-    first, last = to_utc(df["Время первого события"]), to_utc(df["Время последнего события"])
-    first, last = first.where(first >= EVENT_MIN), last.where(last >= EVENT_MIN)
-    dur = (last - first).dt.total_seconds() / 60
-    out["attack_dur_min"] = dur.where(dur >= 0)
-
-    cmd = lists["CMDLINE"].map(lambda xs: "\n".join(xs) if xs else None)
-    out["cmd_len"] = cmd.map(lambda x: float(len(x)) if isinstance(x, str) and x else np.nan)
-    out["cmd_entropy"] = cmd.map(shannon)
-    out["cmd_n"] = lists["CMDLINE"].map(len).astype("int16")
-    out["cmd_enc"] = cmd.fillna("").str.contains("-enc", case=False, regex=False).astype("int8")
-
-    for new, (col, _) in CATEGORICAL.items():
-        if new == "org":
-            out[new] = df[col].map(name_of)
-        else:
-            out[new] = df[col].map(lambda x: (items(x) or [None])[0])
-    # только для анализа ошибок — в модель не идёт (известно после назначения)
-    out["group"] = df["Группа устранения"].map(name_of)
-    return out
-
-
-def find_raw(path: str | None) -> Path:
-    if path:
-        p = Path(path)
-        if not p.exists():
-            raise SystemExit(f"Нет файла {p}")
-        return p
-    for d in SEARCH_DIRS:
-        if (d / RAW_NAME).exists():
-            return d / RAW_NAME
-    raise SystemExit(f"Не нашёл {RAW_NAME} в: " + ", ".join(str(d) for d in SEARCH_DIRS))
-
-
-def load_features(path: Path) -> pd.DataFrame:
+def load_raw(path: Path, advisor: CourseAdvisor) -> pd.DataFrame:
+    """Карточки с 01.06.2025 в исходном порядке строк (от порядка зависит сплит курса)."""
     pf = pq.ParquetFile(path)
-    print(f"Читаю {path.name}: {pf.metadata.num_rows:,} строк, row groups: {pf.num_row_groups}")
+    cols = needed_columns(advisor, pf.schema_arrow.names if pf.schema_arrow is not None else pf.column_names)
+    print(f"Читаю {path.name}: {pf.metadata.num_rows:,} строк, {len(cols)} колонок для модели и срезов")
     parts = []
     for rg in range(pf.num_row_groups):
-        df = pf.read_row_group(rg, columns=RAW_COLS).to_pandas()
-        parts.append(build_features(df))
-        print(f"  row group {rg + 1}/{pf.num_row_groups}: {len(df):,} строк")
-    return pd.concat(parts, ignore_index=True).sort_values("created", kind="stable").reset_index(drop=True)
+        df = pf.read_row_group(rg, columns=cols).to_pandas()
+        created = pd.to_datetime(df["Создан"], format="ISO8601", utc=True)
+        parts.append(df[created >= WINDOW[0]])
+    return pd.concat(parts, ignore_index=True)
 
 
-def assign_part(created: pd.Series) -> pd.Series:
-    return pd.Series(np.select([created < TRAIN_END, created < OPER_START], ["train", "val"], "oper"),
-                     index=created.index)
+def in_scope(df: pd.DataFrame, advisor: CourseAdvisor) -> pd.Series:
+    flt = advisor.cfg["dataset"]["filters"]
+    mask = pd.Series(True, index=df.index)
+    if flt.get("rule_not_null"):
+        mask &= df["Правило корреляции SIEM"].notna()
+    for vendor in flt.get("vendor_not_in", []) or []:
+        mask &= ~df["Вендор из сием"].eq(vendor)
+    return mask
 
 
-def encode(feats: pd.DataFrame, train_mask: pd.Series) -> tuple[pd.DataFrame, list[str]]:
-    """Категории: топ-K значений считаем ТОЛЬКО по обучению; новые значения потом -> other.
-    Учётки и хосты (тысячи значений) — частотное кодирование: сколько раз значение встречалось в обучении."""
-    for new, src in FREQ.items():
-        counts = feats.loc[train_mask, src].value_counts()
-        feats[new] = feats[src].map(counts).fillna(0).astype("float32")
-    cat_cols = []
-    for new, (_, k) in CATEGORICAL.items():
-        keep = feats.loc[train_mask, new].value_counts().nlargest(k).index.tolist()
-        lab = top_k(feats[new], keep)
-        cats = sorted(set(keep)) + ["other", "missing"]
-        feats[new + "_c"] = pd.Categorical(lab, categories=cats).codes.astype("int16")
-        cat_cols.append(new + "_c")
-    return feats, cat_cols
+def window_split(raw: pd.DataFrame, advisor: CourseAdvisor) -> dict:
+    """Повторяет course_ml.data.build + course_ml.train.make_split: id карточек train / val / test."""
+    cfg = advisor.cfg
+    created = pd.to_datetime(raw["Создан"], format="ISO8601", utc=True)
+    mask = (in_scope(raw, advisor) & raw[cfg["dataset"]["target"]["column"]].isin(cfg["dataset"]["filters"]["verdict_in"])
+            & (created >= WINDOW[0]) & (created < WINDOW[1]))
+    df = raw[mask].reset_index(drop=True)
+    prepared, y, created_w = advisor.data_mod.prepare(df, cfg)
+    parts = advisor.train_mod.make_split(prepared, y, created_w, cfg)
+    ids = pd.to_numeric(df["EntityId"]).astype("int64")
+    return {k: set(ids.loc[v]) for k, v in parts.items()}
 
 
 def pick_threshold(y: np.ndarray, p: np.ndarray, target: float) -> float:
@@ -257,73 +137,103 @@ def pick_threshold(y: np.ndarray, p: np.ndarray, target: float) -> float:
     pos = np.sort(p[y == 1])
     if not len(pos):
         return 0.5
-    k = int(np.floor((1 - target) * len(pos)))      # сколько инцидентов можно оставить ниже порога
+    k = int(np.floor((1 - target) * len(pos)))
     return float(pos[k])
 
 
-def main(path: Path) -> None:
-    feats = load_features(path)
-    feats["part"] = assign_part(feats["created"])
-    train_mask = feats["part"].eq("train")
-    feats, cat_cols = encode(feats, train_mask)
-    features = NUM + cat_cols
+def summary(y: np.ndarray, p: np.ndarray, thr: float) -> dict:
+    pred = p >= thr
+    tp, fn = int((pred & (y == 1)).sum()), int((~pred & (y == 1)).sum())
+    fp, tn = int((pred & (y == 0)).sum()), int((~pred & (y == 0)).sum())
+    return dict(n=int(len(y)), pos=int(tp + fn), tp=tp, fn=fn, fp=fp, tn=tn,
+                recall=tp / max(tp + fn, 1), miss=fn / max(tp + fn, 1), precision=tp / max(tp + fp, 1),
+                low_share=float((~pred).mean()), roc_auc=float(roc_auc_score(y, p)),
+                pr_auc=float(average_precision_score(y, p)))
 
-    lab = feats["y"] >= 0
-    tr = feats[train_mask & lab]
-    va = feats[feats["part"].eq("val") & lab]
-    op = feats[feats["part"].eq("oper") & lab]
-    for name, d in [("обучение", tr), ("приёмка", va), ("эксплуатация", op)]:
-        print(f"{name:13s}: {len(d):7,} размеченных карточек, доля реальных инцидентов {d['y'].mean():.3f}, "
-              f"{d['created'].min():%d.%m.%Y} — {d['created'].max():%d.%m.%Y}")
 
-    cat_mask = [f in cat_cols for f in features]
-    model = HistGradientBoostingClassifier(categorical_features=cat_mask, **PARAMS)
-    model.fit(tr[features], tr["y"])
+def build_frame(cards: pd.DataFrame, proba: np.ndarray, part: str, rule_counts: pd.Series) -> pd.DataFrame:
+    created = pd.to_datetime(cards["Создан"], format="ISO8601", utc=True)
+    local = created.dt.tz_convert(LOCAL_TZ)
+    out = pd.DataFrame({
+        "id": pd.to_numeric(cards["EntityId"]).astype("int64").to_numpy(),
+        "created": created.dt.tz_localize(None).to_numpy(),        # UTC, как окна курса
+        "part": part,
+        "verdict": cards["Вердикт"].to_numpy(),
+        "y": cards["Вердикт"].map(LABELS).fillna(-1).astype("int8").to_numpy(),
+        "proba": proba,
+        "rule": cards["Наименование"].to_numpy(),
+        "inc_type": cards["Тип инцидента"].map(first_item).to_numpy(),
+        "irp": cards["Пиктограмма IRP"].map(first_item).to_numpy(),
+        "crit": cards["Критичность"].map(first_item).to_numpy(),
+        "org": cards["Организация"].map(name_of).to_numpy(),
+        "vendor": cards["Вендор из сием"].map(first_item).to_numpy(),
+        "siem": cards["Источник инцидента"].map(first_item).to_numpy(),
+        "group": cards["Группа устранения"].map(name_of).to_numpy(),
+        "hour": local.dt.hour.astype("int8").to_numpy(),
+        "dow": local.dt.dayofweek.astype("int8").to_numpy(),
+        "has_vendor": cards["Вендор из сием"].notna().to_numpy(),
+        "has_alert": cards["Алерт"].notna().to_numpy(),
+    })
+    out["rule_train_n"] = out["rule"].map(rule_counts).fillna(0).astype("int32")
+    return out
 
-    scored = feats[~train_mask].copy()
-    scored["proba"] = model.predict_proba(scored[features])[:, 1]
-    p_va = scored.loc[va.index, "proba"].to_numpy()
-    thr = pick_threshold(va["y"].to_numpy(), p_va, TARGET_RECALL)
 
-    def summary(y, p) -> dict:
-        pred = p >= thr
-        tp, fn = int((pred & (y == 1)).sum()), int((~pred & (y == 1)).sum())
-        fp, tn = int((pred & (y == 0)).sum()), int((~pred & (y == 0)).sum())
-        return dict(n=int(len(y)), pos=int((y == 1).sum()), tp=tp, fn=fn, fp=fp, tn=tn,
-                    recall=tp / max(tp + fn, 1), precision=tp / max(tp + fp, 1),
-                    low_share=float((~pred).mean()), roc_auc=float(roc_auc_score(y, p)),
-                    pr_auc=float(average_precision_score(y, p)))
+def main(path: Path, course_dir: Path) -> None:
+    advisor = CourseAdvisor(course_dir)
+    print(f"Модель курса: {course_dir / 'models' / 'lgbm_gate1__v001'} · вычисление: {advisor.engine} "
+          f"· порог τ = {advisor.threshold:.4f}")
+    raw = load_raw(path, advisor)
+    delta = advisor.self_check(raw)
+    print(f"Самопроверка: 5 контрольных карточек совпали с эталоном, расхождение ≤ {delta:.1e}")
 
-    m_va = summary(va["y"].to_numpy(), p_va)
-    m_op = summary(op["y"].to_numpy(), scored.loc[op.index, "proba"].to_numpy())
-    print(f"\nПорог (recall на приёмке ≥ {TARGET_RECALL:.0%}): {thr:.4f}")
-    for name, m in [("приёмка", m_va), ("эксплуатация", m_op)]:
-        print(f"{name:13s}: найдено {m['recall']:.1%} инцидентов (пропущено {m['fn']} из {m['pos']}), "
-              f"точность {m['precision']:.1%}, в низком приоритете {m['low_share']:.1%} карточек, "
-              f"ROC AUC {m['roc_auc']:.3f}, PR AUC {m['pr_auc']:.3f}")
+    split = window_split(raw, advisor)
+    ids = pd.to_numeric(raw["EntityId"]).astype("int64")
+    created = pd.to_datetime(raw["Создан"], format="ISO8601", utc=True)
+    scope = in_scope(raw, advisor)
+    test = raw[ids.isin(split["test"])]
+    oper = raw[(created >= OPER_START) & scope]
+    print(f"Сплит окна: train {len(split['train']):,} · val {len(split['val']):,} · test {len(split['test']):,}")
+    print(f"Эксплуатация: {len(oper):,} карточек в области модели "
+          f"(вне области: {int(((created >= OPER_START) & ~scope).sum())})")
 
-    # сколько карточек каждого правила модель видела при обучении (новые правила — зона риска)
-    seen = feats.loc[train_mask, "rule"].value_counts()
-    scored["rule_train_n"] = scored["rule"].map(seen).fillna(0).astype("int32")
-    scored["part"] = scored["part"].map({"val": "Приёмка", "oper": "Эксплуатация"})
+    rule_counts = raw.loc[ids.isin(split["train"]), "Наименование"].value_counts()
+    p_test = advisor.predict_proba(test)
+    p_oper = advisor.predict_proba(oper)
+    scored = pd.concat([build_frame(test, p_test, "Приёмка", rule_counts),
+                        build_frame(oper, p_oper, "Эксплуатация", rule_counts)], ignore_index=True)
 
-    keep = ["id", "created", "part", "verdict", "y", "proba", "rule", "inc_type", "irp", "crit", "org",
-            "vendor", "siem", "group", "hour", "dow", "rule_train_n", "cmd_len", "attack_dur_min"]
+    tau = advisor.threshold
+    lab_t = scored[(scored["part"] == "Приёмка") & (scored["y"] >= 0)]
+    lab_o = scored[(scored["part"] == "Эксплуатация") & (scored["y"] >= 0)]
+    m_test = summary(lab_t["y"].to_numpy(), lab_t["proba"].to_numpy(), tau)
+    m_oper = summary(lab_o["y"].to_numpy(), lab_o["proba"].to_numpy(), tau)
+    same = all(m_test[k] == v for k, v in PUBLISHED_TEST.items())
+    print(f"Приёмка (test-сплит): TP {m_test['tp']} / FP {m_test['fp']} / FN {m_test['fn']} / TN {m_test['tn']} — "
+          + ("совпадает с карточкой модели" if same else f"НЕ совпадает с карточкой модели {PUBLISHED_TEST}"))
+    for name, m in [("приёмка", m_test), ("эксплуатация", m_oper)]:
+        print(f"{name:13s}: пропущено {m['fn']} из {m['pos']} ({m['miss']:.1%}), в низком приоритете "
+              f"{m['low_share']:.1%}, точность {m['precision']:.1%}, ROC AUC {m['roc_auc']:.3f}")
+
+    t99 = pick_threshold(lab_t["y"].to_numpy(), lab_t["proba"].to_numpy(), 0.99)
+    tau_label = f"Рабочий порог модели τ = {tau:.4f}".replace(".", ",")
+    policies = {tau_label: tau, "Находить 99 % инцидентов приёмки": t99, "Порог 0,5": 0.5}
+
     AGG_DIR.mkdir(parents=True, exist_ok=True)
-    scored[keep].to_parquet(AGG_DIR / "scored.parquet", index=False)
-
+    scored.to_parquet(AGG_DIR / "scored.parquet", index=False)
     meta = {
         "dataset": path.name,
+        "model": "lgbm_gate1__v001", "engine": advisor.engine, "self_check_delta": delta,
+        "run_id": advisor.run["run_id"],
         "periods": {
-            "train": [str(feats["created"].min().date()), str((TRAIN_END - pd.Timedelta(days=1)).date())],
-            "val": [str(TRAIN_END.date()), str((OPER_START - pd.Timedelta(days=1)).date())],
-            "oper": [str(OPER_START.date()), str(feats["created"].max().date())],
+            "train": [str(WINDOW[0].date()), str((WINDOW[1] - pd.Timedelta(days=1)).date())],
+            "val": [str(WINDOW[0].date()), str((WINDOW[1] - pd.Timedelta(days=1)).date())],
+            "oper": [str(OPER_START.date()), str(created.max().date())],
         },
-        "n_train": int(len(tr)), "pos_rate_train": float(tr["y"].mean()),
-        "target_recall": TARGET_RECALL, "threshold": thr,
-        "policies": {f"{t:.2f}": pick_threshold(va["y"].to_numpy(), p_va, t) for t in POLICIES},
-        "val_metrics": m_va, "oper_metrics": m_op,
-        "features": features, "params": PARAMS,
+        "n_train": len(split["train"]),
+        "pos_rate_train": float(raw.loc[ids.isin(split["train"]), "Вердикт"].eq("Решён").mean()),
+        "threshold": tau, "target_miss": m_test["miss"], "target_recall": m_test["recall"],
+        "policies": policies, "default_policy": tau_label,
+        "val_metrics": m_test, "oper_metrics": m_oper, "published_test_match": same,
     }
     (AGG_DIR / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     print("\nГотово:", AGG_DIR.resolve())
@@ -332,4 +242,6 @@ def main(path: Path) -> None:
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--path", help="путь к iavd_ml_dataset.parquet")
-    main(find_raw(ap.parse_args().path))
+    ap.add_argument("--course-dir", help="папка пакета модели курса IAVD_3.7_ML_team")
+    args = ap.parse_args()
+    main(find_raw(args.path), find_course_dir(args.course_dir))

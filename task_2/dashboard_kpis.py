@@ -21,12 +21,12 @@ TILES = {
                 ("r_miss", "Пропущено реальных инцидентов"), ("r_low", "Очередь разгружена")],
     "agreement": [("a_all", "Общее согласие с аналитиками"), ("a_inc", "Согласие на реальных инцидентах"),
                   ("a_fp", "Согласие на False Positive"), ("a_none", "Без вердикта SOC")],
-    "misses": [("m_rate", "Доля пропусков"), ("m_months", "Месяцев хуже цели"),
+    "misses": [("m_rate", "Доля пропусков"), ("m_months", "Месяцев хуже приёмки"),
                ("m_high", "Пропущено высокой критичности"), ("m_near", "Пропуски у самого порога")],
     "errors": [("e_worst", "Где пропусков больше всего"), ("e_rare", "Пропуски на редких правилах"),
                ("e_new", "Карточки с новыми правилами"), ("e_fp", "FP в приоритете")],
     "trust": [("t_auc", "Качество ранжирования (AUC)"), ("t_cal", "Модель завышает вероятность"),
-              ("t_flow", "Доля инцидентов в потоке"), ("t_worst", "Худший месяц")],
+              ("t_flow", "Карточки с обогащением"), ("t_worst", "Худший месяц")],
 }
 TEXT_TILES = {"e_worst", "t_worst"}
 
@@ -65,8 +65,8 @@ def results(oper: pd.DataFrame, c: dd.Confusion, cv: dd.Confusion, target_miss: 
     out = _tile("r_n", dd.fmt_int(len(oper)), f"с вердиктом SOC: {dd.fmt_int(c.n)} — по ним считаем качество")
     out |= _tile("r_found", dd.fmt_pct(c.recall), f"{dd.fmt_int(c.tp)} из {dd.fmt_int(c.pos)} попали в приоритет",
                  kind="kpi-real")
-    out |= _tile("r_miss", dd.fmt_int(c.fn), f"{dd.fmt_pct(c.miss)} реальных инцидентов · цель приёмки ≤ {dd.fmt_pct(target_miss, 0)}",
-                 alert=c.miss > target_miss)
+    out |= _tile("r_miss", dd.fmt_int(c.fn), f"{dd.fmt_pct(c.miss)} реальных инцидентов · на приёмке {dd.fmt_pct(target_miss)}",
+                 alert=dd.wilson(c.fn, c.pos)[0] > target_miss)       # хуже приёмки с учётом случайности
     dropped = cv.n and c.low_share < cv.low_share * LOW_SHARE_DROP
     out |= _tile("r_low", dd.fmt_pct(c.low_share, 0),
                  f"{dd.fmt_int(c.fn + c.tn)} карточек отложено · на приёмке {dd.fmt_pct(cv.low_share, 0)}",
@@ -94,11 +94,11 @@ def misses(oper: pd.DataFrame, c: dd.Confusion, mon_oper: pd.DataFrame, thr: flo
     if c.pos == 0:
         return empty("misses")
     lo, hi = dd.wilson(c.fn, c.pos)
-    out = _tile("m_rate", dd.fmt_pct(c.miss), f"95 %-ный интервал {dd.fmt_pct(lo)} — {dd.fmt_pct(hi)}",
+    out = _tile("m_rate", dd.fmt_pct(c.miss), f"интервал {dd.fmt_pct(lo)} — {dd.fmt_pct(hi)} · на приёмке {dd.fmt_pct(target_miss)}",
                 alert=lo > target_miss)
     if len(mon_oper):
         bad = mon_oper[mon_oper["miss_lo"] > target_miss]
-        note = ("хуже: " + ", ".join(dd.month_label(m) for m in bad["month"])) if len(bad) else "все месяцы в пределах цели"
+        note = ("хуже: " + ", ".join(dd.month_label(m) for m in bad["month"])) if len(bad) else "все месяцы на уровне приёмки"
         out |= _tile("m_months", f"{len(bad)} из {len(mon_oper)}", note, alert=len(bad) > 0)
     else:
         out |= _tile("m_months", DASH)
@@ -167,9 +167,11 @@ def trust(oper: pd.DataFrame, val: pd.DataFrame, mon_oper: pd.DataFrame, meta: d
     out |= _tile("t_cal", f"×{dd.fmt_num(ratio, 1)}" if np.isfinite(ratio) else DASH,
                  f"пишет в среднем {dd.fmt_pct(pred)}, реальных инцидентов {dd.fmt_pct(act)}",
                  alert=bool(np.isfinite(ratio) and (ratio >= OVERCONF or ratio <= 1 / OVERCONF)))
-    out |= _tile("t_flow", dd.fmt_pct(act),
-                 f"на приёмке {dd.fmt_pct(lab_v['y'].mean()) if len(lab_v) else DASH} · "
-                 f"в обучении {dd.fmt_pct(meta.get('pos_rate_train', np.nan))}", kind="kpi-real")
+    enr = float((lab["has_vendor"] & lab["has_alert"]).mean())
+    enr_v = float((lab_v["has_vendor"] & lab_v["has_alert"]).mean()) if len(lab_v) else np.nan
+    out |= _tile("t_flow", dd.fmt_pct(enr, 0),
+                 f"заполнены «Вендор» и «Алерт» · на приёмке {dd.fmt_pct(enr_v, 0)}",
+                 alert=bool(np.isfinite(enr_v) and enr < enr_v * 0.75))
     m = mon_oper.dropna(subset=["auc"])
     if len(m):
         w = m.sort_values("auc").iloc[0]
