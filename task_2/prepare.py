@@ -12,9 +12,10 @@ prepare.py — сырой iavd_ml_dataset.parquet -> признаки -> мод�
     эксплуатация  с 01.05.2025 до конца выгрузки   — модель с зафиксированным порогом сортирует
                                                      очередь; её оценки сверяем с вердиктами SOC
 
-Модель видит только то, что известно в момент создания карточки (правило, критичность, категория,
-поля события, командная строка). Вердикт, решение, комментарии, меры и времена обработки
-в признаки не идут — это утечка ответа.
+Признаки — только поля категории A словаря iavd_incidents_ml_field_dictionary.md (известны в момент
+создания карточки): правило, критичность, SLA, категория, поля события, учётки и хосты, командная строка.
+Поля категории C (вердикт, решение, комментарии, меры, флаги процесса, времена обработки) — утечка ответа.
+«Теги» и «Описание инцидента» словарь помечает «A→C?» (могут дополняться при разборе) — тоже не берём.
 
 Что получается в data/agg/:
     scored.parquet  — карточки приёмки и эксплуатации: вердикт, оценка модели, срезы для анализа ошибок
@@ -54,10 +55,12 @@ CRIT_SRC = {"Low": 1, "Medium": 2, "High": 3}
 RAW_COLS = [
     "EntityId", "Дата создания", "Вердикт", "Критичность", "Критичность инцидента в источнике",
     "Тип инцидента", "Источник инцидента", "Наименование", "Пиктограмма IRP", "Организация",
-    "Конвейер SIEM", "Вендор из сием", "Теги", "categoryHigh", "categoryLow", "categoryMain", "object",
+    "Конвейер SIEM", "Вендор из сием", "categoryHigh", "categoryLow", "categoryMain", "object",
     "processName", "Имя родителя процесса", "commandName", "Привилегии аккаунта", "CMDLINE",
-    "Описание инцидента", "Значение Инцидента (группировка)", "Правило корреляции SIEM", "Алерт",
+    "Значение Инцидента (группировка)", "Правило корреляции SIEM", "Алерт",
     "src", "dst", "FilePath", "Время первого события", "Время последнего события", "Группа устранения",
+    "SLA по устранению Атаки", "SLA по взятию в работу Атаки", "Количество инцидентов", "Типы угроз",
+    "Список вредоносных команд", "suser", "duser", "Hostname Цели", "Hostname атакующего",
 ]
 
 # новое имя -> (исходная колонка, сколько самых частых значений оставить; остальное -> other)
@@ -77,10 +80,13 @@ CATEGORICAL = {
     "proc_parent": ("Имя родителя процесса", 30),
     "cmd_name": ("commandName", 30),
     "priv": ("Привилегии аккаунта", 6),
-    "tag1": ("Теги", 15),
 }
-NUM = ["crit_ord", "crit_src_ord", "hour", "dow", "attack_dur_min", "n_rules", "n_tags", "n_src", "n_dst",
-       "n_values", "n_alerts", "n_files", "desc_len", "cmd_len", "cmd_entropy", "cmd_n", "cmd_enc"]
+NUM = ["crit_ord", "crit_src_ord", "hour", "dow", "attack_dur_min", "n_rules", "n_src", "n_dst",
+       "n_values", "n_alerts", "n_files", "cmd_len", "cmd_entropy", "cmd_n", "cmd_enc",
+       "sla_fix_min", "sla_take_min", "n_incidents", "n_threats", "n_malcmd",
+       "n_suser", "n_duser", "n_host_dst", "n_host_src", "suser_freq", "host_dst_freq"]
+EVENT_MIN = pd.Timestamp("2024-04-12", tz="UTC")   # события раньше начала выгрузки — выбросы (словарь, раздел 8)
+FREQ = {"suser_freq": "suser1", "host_dst_freq": "host_dst1"}   # частотное кодирование по обучению
 PARAMS = dict(max_iter=300, learning_rate=0.05, max_leaf_nodes=31, min_samples_leaf=40,
               l2_regularization=1.0, early_stopping=False, random_state=SEED)
 
@@ -93,7 +99,7 @@ def items(x) -> list[str]:
     s = x.strip()
     if s.startswith("["):
         try:
-            v = json.loads(s)
+            v = json.loads(s, strict=False)    # strict=False: в командных строках бывают управляющие символы
             return [str(i) for i in v if i not in (None, "")] if isinstance(v, list) else [str(v)]
         except ValueError:
             pass
@@ -110,6 +116,19 @@ def name_of(x) -> str | None:
         except ValueError:
             return None
     return x
+
+
+def n_entities(xs: list[str]) -> int:
+    """Число сущностей: элементы списка, внутри которых значения ещё разделены «|»."""
+    return sum(len([p for p in x.split("|") if p]) for x in xs)
+
+
+def first_entity(xs: list[str]) -> str | None:
+    for x in xs:
+        for p in x.split("|"):
+            if p:
+                return p.strip().lower()
+    return None
 
 
 def shannon(text) -> float:
@@ -147,18 +166,29 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     out["crit_ord"] = df["Критичность"].map(CRIT)
     out["crit_src_ord"] = df["Критичность инцидента в источнике"].map(CRIT_SRC)
 
-    lists = {c: df[c].map(items) for c in ["Правило корреляции SIEM", "Теги", "src", "dst",
-                                           "Значение Инцидента (группировка)", "Алерт", "FilePath", "CMDLINE"]}
+    lists = {c: df[c].map(items) for c in ["Правило корреляции SIEM", "src", "dst", "Значение Инцидента (группировка)",
+                                           "Алерт", "FilePath", "CMDLINE", "Типы угроз", "Список вредоносных команд",
+                                           "suser", "duser", "Hostname Цели", "Hostname атакующего"]}
     out["n_rules"] = lists["Правило корреляции SIEM"].map(len).astype("int16")
-    out["n_tags"] = lists["Теги"].map(len).astype("int16")
     out["n_src"] = lists["src"].map(len).astype("int16")
     out["n_dst"] = lists["dst"].map(len).astype("int16")
     out["n_values"] = lists["Значение Инцидента (группировка)"].map(len).astype("int16")
     out["n_alerts"] = lists["Алерт"].map(len).astype("int16")
     out["n_files"] = lists["FilePath"].map(len).astype("int16")
-    out["desc_len"] = df["Описание инцидента"].fillna("").str.len().astype("int32")
+    out["n_threats"] = lists["Типы угроз"].map(len).astype("int16")
+    out["n_malcmd"] = lists["Список вредоносных команд"].map(len).astype("int16")
+    out["n_suser"] = lists["suser"].map(n_entities).astype("int16")
+    out["n_duser"] = lists["duser"].map(n_entities).astype("int16")
+    out["n_host_dst"] = lists["Hostname Цели"].map(n_entities).astype("int16")
+    out["n_host_src"] = lists["Hostname атакующего"].map(n_entities).astype("int16")
+    out["suser1"] = lists["suser"].map(first_entity)
+    out["host_dst1"] = lists["Hostname Цели"].map(first_entity)
+    out["sla_fix_min"] = pd.to_numeric(df["SLA по устранению Атаки"], errors="coerce") / 60000     # мс -> мин
+    out["sla_take_min"] = pd.to_numeric(df["SLA по взятию в работу Атаки"], errors="coerce") / 60000
+    out["n_incidents"] = pd.to_numeric(df["Количество инцидентов"], errors="coerce")
 
     first, last = to_utc(df["Время первого события"]), to_utc(df["Время последнего события"])
+    first, last = first.where(first >= EVENT_MIN), last.where(last >= EVENT_MIN)
     dur = (last - first).dt.total_seconds() / 60
     out["attack_dur_min"] = dur.where(dur >= 0)
 
@@ -207,7 +237,11 @@ def assign_part(created: pd.Series) -> pd.Series:
 
 
 def encode(feats: pd.DataFrame, train_mask: pd.Series) -> tuple[pd.DataFrame, list[str]]:
-    """Категории: топ-K значений считаем ТОЛЬКО по обучению; новые значения потом -> other."""
+    """Категории: топ-K значений считаем ТОЛЬКО по обучению; новые значения потом -> other.
+    Учётки и хосты (тысячи значений) — частотное кодирование: сколько раз значение встречалось в обучении."""
+    for new, src in FREQ.items():
+        counts = feats.loc[train_mask, src].value_counts()
+        feats[new] = feats[src].map(counts).fillna(0).astype("float32")
     cat_cols = []
     for new, (_, k) in CATEGORICAL.items():
         keep = feats.loc[train_mask, new].value_counts().nlargest(k).index.tolist()
