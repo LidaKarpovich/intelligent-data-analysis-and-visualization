@@ -184,6 +184,31 @@ def apply_filters(store: Store, f: Filters, part: str | None = OPER, by_period: 
     return out
 
 
+def is_default_policy(store: Store, f: Filters) -> bool:
+    return (f.policy or default_policy(store)) == default_policy(store)
+
+
+def acceptance(store: Store, f: Filters) -> pd.DataFrame:
+    """Приёмка — всегда весь тестовый сплит окна обучения: фильтры шапки (месяц, организация,
+    критичность) к ней не применяются, иначе это уже не числа карточки модели.
+    Порог — выбранный: при пороге «что если» это тот же сплит с другим порогом."""
+    out = store.cards[store.cards["part"] == VAL].copy()
+    out["pred"] = out["proba"] >= threshold_of(store, f)
+    return out
+
+
+def acceptance_label(store: Store, f: Filters) -> str:
+    """Подпись эталона: «на приёмке» при рабочем пороге, иначе видно, что порог другой."""
+    if is_default_policy(store, f):
+        return "на приёмке"
+    return f"на приёмке при пороге {fmt_num(threshold_of(store, f), 4)}"
+
+
+def timeline(store: Store, f: Filters) -> pd.DataFrame:
+    """Помесячные метрики: приёмка — весь сплит, эксплуатация — с фильтрами шапки (все месяцы)."""
+    return monthly(pd.concat([acceptance(store, f), apply_filters(store, f, by_period=False)], ignore_index=True))
+
+
 def with_pred(d: pd.DataFrame, thr: float) -> pd.DataFrame:
     out = d.copy()
     out["pred"] = out["proba"] >= thr
@@ -287,6 +312,28 @@ def gains(d: pd.DataFrame, points: int = 201) -> pd.DataFrame:
     xs = np.arange(len(lab) + 1) / len(lab)
     idx = np.unique(np.linspace(0, len(lab), points).round().astype(int))
     return pd.DataFrame({"x": xs[idx], "y": hits[idx]})
+
+
+def curves(d: pd.DataFrame, points: int = 400) -> dict | None:
+    """ROC- и PR-кривые по размеченным карточкам (y = 1 «Решён», y = 0 «False Positive»).
+    PR-AUC — average precision, как в sklearn: Σ (R_n − R_{n−1}) · P_n."""
+    lab = d[d["y"] >= 0]
+    y = (lab["y"] == 1).to_numpy()
+    if y.sum() == 0 or (~y).sum() == 0:
+        return None
+    order = np.argsort(-lab["proba"].to_numpy(), kind="stable")
+    s, y = lab["proba"].to_numpy()[order], y[order]
+    last = np.r_[np.flatnonzero(np.diff(s)), len(s) - 1]         # последний индекс каждого порога
+    tp, fp = np.cumsum(y)[last], np.cumsum(~y)[last]
+    pos, neg = int(y.sum()), int((~y).sum())
+    tpr, fpr = np.r_[0.0, tp / pos], np.r_[0.0, fp / neg]
+    recall, precision = tp / pos, tp / (tp + fp)
+    ap = float(np.sum(np.diff(np.r_[0.0, recall]) * precision))
+    keep = np.unique(np.linspace(0, len(tpr) - 1, min(points, len(tpr))).round().astype(int))
+    keep_pr = np.unique(np.linspace(0, len(recall) - 1, min(points, len(recall))).round().astype(int))
+    return dict(fpr=fpr[keep], tpr=tpr[keep], recall=recall[keep_pr], precision=precision[keep_pr],
+                auc=float(np.trapezoid(tpr, fpr)) if hasattr(np, "trapezoid") else float(np.trapz(tpr, fpr)),
+                ap=ap, prevalence=pos / (pos + neg))
 
 
 CAL_EDGES = [0, 0.02, 0.05, 0.1, 0.2, 0.3, 0.5, 0.7, 1.0001]

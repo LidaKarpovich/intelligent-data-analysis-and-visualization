@@ -52,10 +52,14 @@ WHY = {
                 "Срез, чей интервал целиком правее среднего, ошибается систематически, а не случайно.",
     "hist": "Гистограмма оценок модели по вердиктам показывает, где проходят ошибки: пропуски рядом с порогом "
             "лечатся его сдвигом, а пропуски с почти нулевой оценкой — только новыми признаками или переобучением.",
+    "roc_pr": "ROC- и PR-кривые вместе с рабочим порогом τ и абсолютными TP, FP, FN, TN — как требует методичка при редком "
+              "положительном классе: низкая доля ложных срабатываний на ROC может прятать большой абсолютный FP и низкую точность. "
+              "Приёмка и эксплуатация — на разных панелях: PR-кривые выборок с разной долей инцидентов сравнивать нельзя.",
     "calibration": "Диаграмма калибровки отвечает на вопрос «если модель пишет 30 %, это правда 30 %?». "
                    "Точки на диагонали — оценке можно верить как вероятности; размер точки — число карточек.",
-    "dumbbell": "Гантели сравнивают одни и те же показатели «на приёмке» и «в работе» на общей шкале 0–100 %: "
-                "длина перемычки — насколько изменилось поведение модели.",
+    "dumbbell": "Гантели сравнивают показатели, не зависящие от доли инцидентов (recall, согласие на FP), и разгрузку "
+                "очереди «на приёмке» и «в работе» на общей шкале 0–100 %; доля инцидентов в потоке — строка-контекст. Длина "
+                "перемычки — насколько изменилось поведение модели.",
     "drift": "Три панели с общей осью времени вместо одного графика с двумя шкалами: качество ранжирования, "
              "заполненность обогащения и доля инцидентов в потоке меняются вместе, и это видно по одной вертикали.",
 }
@@ -245,7 +249,8 @@ def fig_agreement_monthly(mon: pd.DataFrame, sel: pd.Period | None = None) -> go
 
 
 # ================================================================ 3. ПРОПУСКИ
-def fig_miss_monthly(mon: pd.DataFrame, target_miss: float, sel: pd.Period | None = None) -> go.Figure:
+def fig_miss_monthly(mon: pd.DataFrame, target_miss: float, sel: pd.Period | None = None,
+                     ref_label: str = "на приёмке") -> go.Figure:
     """Доля пропущенных реальных инцидентов по месяцам + 95 %-ный интервал + цель приёмки."""
     if mon.empty:
         return empty()
@@ -254,7 +259,7 @@ def fig_miss_monthly(mon: pd.DataFrame, target_miss: float, sel: pd.Period | Non
     colors = [MISS if o else (VAL_COLOR if p == dd.VAL else OPER_COLOR) for o, p in zip(over, mon["part"])]
     fig = go.Figure()
     fig.add_hline(y=target_miss, line=dict(color=MUTED, width=1.5, dash="dash"),
-                  annotation_text=f"уровень приёмки: {dd.fmt_pct(target_miss)}",
+                  annotation_text=f"{ref_label}: {dd.fmt_pct(target_miss)}",
                   annotation_position="top right", annotation_font=dict(size=11, color=INK_2))
     fig.add_trace(go.Scatter(
         x=x, y=mon["miss"], mode="markers+text", showlegend=False,
@@ -385,6 +390,64 @@ def fig_score_hist(d: pd.DataFrame, thr: float) -> go.Figure:
 
 
 # ================================================================ 5. ДОВЕРИЕ К ОЦЕНКЕ
+def fig_roc_pr(val: pd.DataFrame, oper: pd.DataFrame, thr: float, val_title: str = "Приёмка") -> go.Figure:
+    """2 × 2: строка — выборка (приёмка — весь тест-сплит; эксплуатация — с фильтрами), столбцы — ROC и PR.
+    На каждой кривой — точка рабочего порога, у ROC — абсолютные TP / FP / FN / TN при этом пороге.
+    PR-кривые выборок не накладываются: базовая линия PR = доля инцидентов, а она в выборках разная."""
+    rows = [(val, val_title, VAL_COLOR), (oper, "Эксплуатация", OPER_COLOR)]
+    cur = [dd.curves(d) for d, _, _ in rows]
+    if all(c is None for c in cur):
+        return empty()
+    titles = []
+    for (d, name, _), c in zip(rows, cur):
+        titles += ([f"{name} · ROC, AUC {dd.fmt_num(c['auc'], 3)}", f"{name} · PR, PR-AUC {dd.fmt_num(c['ap'], 3)}"]
+                   if c else [f"{name} · нет данных", ""])
+    fig = make_subplots(rows=2, cols=2, subplot_titles=titles, horizontal_spacing=0.1, vertical_spacing=0.16)
+    for r, ((d, name, color), c) in enumerate(zip(rows, cur), start=1):
+        if c is None:
+            continue
+        cm = dd.confusion(d.assign(pred=d["proba"] >= thr))
+        fpr_t = cm.fp / cm.neg if cm.neg else np.nan
+        counts = (f"TP {dd.fmt_int(cm.tp)} · FP {dd.fmt_int(cm.fp)}<br>FN {dd.fmt_int(cm.fn)} · TN {dd.fmt_int(cm.tn)}")
+        # ROC
+        fig.add_trace(go.Scatter(x=[0, 1], y=[0, 1], mode="lines", line=dict(color=GRAY_LIGHT, width=1, dash="dash"),
+                                 hoverinfo="skip", showlegend=False), row=r, col=1)
+        fig.add_trace(go.Scatter(x=c["fpr"], y=c["tpr"], mode="lines", line=dict(color=color, width=2), showlegend=False,
+                                 hovertemplate=f"{name}: FPR %{{x:.1%}}, recall %{{y:.1%}}<extra></extra>"), row=r, col=1)
+        fig.add_trace(go.Scatter(x=[fpr_t], y=[cm.recall], mode="markers", showlegend=False,
+                                 marker=dict(size=11, color=color, line=dict(color=INK, width=1.5)),
+                                 hovertemplate=(f"τ = {dd.fmt_num(thr, 4)}: FPR {dd.fmt_pct(fpr_t)}, recall {dd.fmt_pct(cm.recall)}"
+                                                f"<br>{counts.replace('<br>', ' · ')}<extra></extra>")), row=r, col=1)
+        ax_id = "" if r == 1 else str(2 * r - 1)          # оси ROC-панели строки r: x / x3
+        fig.add_annotation(x=0.98, y=0.04, xref=f"x{ax_id} domain", yref=f"y{ax_id} domain", xanchor="right",
+                           yanchor="bottom", showarrow=False, align="right", text=f"при τ: {counts}",
+                           font=dict(size=11, color=INK_2))
+        # PR
+        fig.add_hline(y=c["prevalence"], line=dict(color=MUTED, width=1, dash="dash"), row=r, col=2,
+                      exclude_empty_subplots=False,                  # базовая линия PR = доля инцидентов выборки
+                      annotation_text=f"доля инцидентов {dd.fmt_pct(c['prevalence'], 0)}",
+                      annotation_position="bottom left", annotation_font=dict(size=10, color=MUTED))
+        fig.add_trace(go.Scatter(x=c["recall"], y=c["precision"], mode="lines", line=dict(color=color, width=2),
+                                 showlegend=False,
+                                 hovertemplate=f"{name}: recall %{{x:.1%}}, precision %{{y:.1%}}<extra></extra>"), row=r, col=2)
+        fig.add_trace(go.Scatter(x=[cm.recall], y=[cm.precision], mode="markers+text", showlegend=False,
+                                 text=["τ"], textposition="top right", textfont=dict(size=12, color=INK),
+                                 marker=dict(size=11, color=color, line=dict(color=INK, width=1.5)),
+                                 hovertemplate=(f"τ = {dd.fmt_num(thr, 4)}: recall {dd.fmt_pct(cm.recall)}, "
+                                                f"precision {dd.fmt_pct(cm.precision)}<extra></extra>")), row=r, col=2)
+        fig.update_xaxes(title_text="Доля ложных срабатываний (FPR)" if r == 2 else None, range=[0, 1],
+                         tickformat=".0%", dtick=0.25, row=r, col=1)
+        fig.update_yaxes(title_text="Recall", range=[0, 1.02], tickformat=".0%", dtick=0.25, row=r, col=1)
+        fig.update_xaxes(title_text="Recall" if r == 2 else None, range=[0, 1], tickformat=".0%", dtick=0.25, row=r, col=2)
+        fig.update_yaxes(title_text="Precision", range=[0, 1.02], tickformat=".0%", dtick=0.25, row=r, col=2)
+    for a in fig.layout.annotations:                # заголовки панелей — по левому краю своей панели
+        if a.text in titles and a.text:
+            a.update(font=dict(size=12, color=INK_2), x=a.x - 0.225, xanchor="left")
+    fig.update_xaxes(showline=True, linecolor=AXIS, showgrid=True, gridcolor=GRID)
+    return base(fig, 620, margin=dict(l=8, r=16, t=28, b=8))
+
+
+
 def fig_calibration(val: pd.DataFrame, oper: pd.DataFrame) -> go.Figure:
     """Средняя оценка модели в корзине против фактической доли реальных инцидентов."""
     cv, co = dd.calibration(val), dd.calibration(oper)

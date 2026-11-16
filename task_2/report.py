@@ -35,6 +35,10 @@ CHARTS = [
      "тепловая карта: не показывает неопределённость, а без неё случайность не отличить от системы"),
     ("4 · Зоны ошибок", "Насколько модель была уверена, когда ошиблась", "Гистограмма на логарифмической шкале", "hist",
      "KDE: сглаживание размоет немногочисленные пропуски у порога, а важны реальные частоты"),
+    ("5 · Можно ли верить", "Насколько модель различает инциденты и FP: ROC и PR с рабочим порогом",
+     "ROC- и PR-кривые, приёмка и эксплуатация на разных панелях", "roc_pr",
+     "одна ROC-кривая: при редком классе низкий FPR прячет тысячи FP и низкую точность; общая PR-панель: доля инцидентов "
+     "в выборках разная, их PR-кривые сравнивать нельзя"),
     ("5 · Можно ли верить", "Если модель пишет «30 %», сколько на самом деле инцидентов", "Диаграмма калибровки", "calibration",
      "PR-кривая: о ранжировании, но не о том, можно ли читать оценку как вероятность"),
     ("5 · Можно ли верить", "Что изменилось между приёмкой и эксплуатацией", "Гантели (dumbbell)", "dumbbell",
@@ -54,8 +58,8 @@ def build(store: dd.Store, f: dd.Filters | None = None) -> str:
     thr = dd.threshold_of(store, f)
     target = dd.target_miss(store)
     meta = store.meta
-    oper, val = dd.apply_filters(store, f), dd.apply_filters(store, f, part=dd.VAL)
-    mon = dd.monthly(dd.apply_filters(store, f, part=None, by_period=False))
+    oper, val = dd.apply_filters(store, f), dd.acceptance(store, f)     # приёмка — весь тест-сплит, без фильтров
+    mon = dd.timeline(store, f)
     mo = mon[mon["part"] == dd.OPER]
     c, cv = dd.confusion(oper), dd.confusion(val)
     lab, lab_v = oper[oper["y"] >= 0], val[val["y"] >= 0]
@@ -95,9 +99,11 @@ def build(store: dd.Store, f: dd.Filters | None = None) -> str:
     rules = (oper[oper["y"] == 1].groupby("rule")
              .agg(pos=("pred", "size"), fn=("pred", lambda s: int((~s).sum())))
              .query("fn > 0").sort_values("fn", ascending=False).head(3))
+    # только показатели, не зависящие от доли инцидентов в выборке (методичка, 5.1): precision сюда не входит
     changes = sorted([("разгрузка очереди", cv.low_share, c.low_share), ("доля найденных инцидентов", cv.recall, c.recall),
-                      ("точность приоритета", cv.precision, c.precision), ("согласие на FP", cv.specificity, c.specificity)],
+                      ("согласие на FP", cv.specificity, c.specificity)],
                      key=lambda r: -abs(r[2] - r[1]))[:2]
+    roc_v, roc_o = dd.curves(val), dd.curves(oper)
     cal_ratio = lab["proba"].mean() / lab["y"].mean() if lab["y"].mean() else np.nan
 
     if c.low_share < cv.low_share * 0.8:
@@ -106,11 +112,12 @@ def build(store: dd.Store, f: dd.Filters | None = None) -> str:
     else:
         queue_bullet = (f"- **Очередь модель разгружает почти как на приёмке:** откладывает {dd.fmt_pct(c.low_share, 0)} "
                         f"карточек с вердиктом (на приёмке {dd.fmt_pct(cv.low_share, 0)}). ")
-        if c.precision < cv.precision / 1.5:
-            queue_bullet += (f"Но доля реальных инцидентов в приоритетной очереди упала: {dd.fmt_pct(c.precision, 0)} "
-                             f"против {dd.fmt_pct(cv.precision, 0)} на приёмке.")
-        else:
-            queue_bullet += f"Доля инцидентов в приоритетной очереди — {dd.fmt_pct(c.precision, 0)} (на приёмке {dd.fmt_pct(cv.precision, 0)})."
+        # FPR, а не precision: precision зависит от доли инцидентов, а она в выборках разная
+        fpr, fpr_v = 1 - c.specificity, 1 - cv.specificity
+        queue_bullet += (f"Но ложных тревог стало в {dd.fmt_num(fpr / fpr_v, 1)} раза больше: в приоритет попадает "
+                         f"{dd.fmt_pct(fpr, 0)} всех False Positive против {dd.fmt_pct(fpr_v, 0)} на приёмке."
+                         if fpr_v and fpr > 1.5 * fpr_v else
+                         f"Доля False Positive, попавших в приоритет, — {dd.fmt_pct(fpr, 0)} (на приёмке {dd.fmt_pct(fpr_v, 0)}).")
 
     def rate(t: pd.DataFrame, key: str) -> str:
         return (f"{int(t.loc[key, 'fn'])} из {int(t.loc[key, 'n'])} ({dd.fmt_pct(t.loc[key, 'rate'], 0)})"
@@ -164,7 +171,7 @@ def build(store: dd.Store, f: dd.Filters | None = None) -> str:
         f"*Каскадная диаграмма.* Из {dd.fmt_int(c.n)} карточек с вердиктом модель отложила {dd.fmt_int(c.fn + c.tn)} "
         f"({dd.fmt_pct(c.low_share)}): {dd.fmt_int(c.tn)} верно (False Positive) и {c.fn} ошибочно (реальные инциденты). "
         f"В приоритете осталось {dd.fmt_int(c.tp + c.fp)} карточек, и инцидентом в них оказывается каждая "
-        f"{every(c.precision)}-я ({dd.fmt_pct(c.precision)}); на приёмке — {dd.fmt_pct(cv.precision)}. "
+        f"{every(c.precision)}-я ({dd.fmt_pct(c.precision)}). "
         f"Ещё {dd.fmt_int((oper['y'] < 0).sum())} карточек без вердикта модель тоже оценила, но в каскад и в долю "
         "разгрузки они не входят: сверить их решение не с чем.",
         "",
@@ -213,6 +220,15 @@ def build(store: dd.Store, f: dd.Filters | None = None) -> str:
         "",
         "## 5. Можно ли верить оценке модели и не устарела ли она?",
         "",
+        f"*ROC и PR.* На приёмке (весь тест-сплит, {dd.fmt_int(cv.n)} {pl(cv.n, ('карточка', 'карточки', 'карточек'))}, доля инцидентов {dd.fmt_pct(cv.pos / cv.n, 0)}) "
+        f"AUC {dd.fmt_num(roc_v['auc'], 3)}, PR-AUC {dd.fmt_num(roc_v['ap'], 3)}; рабочий порог τ даёт recall "
+        f"{dd.fmt_pct(cv.recall)} и precision {dd.fmt_pct(cv.precision)} при TP {cv.tp} / FP {cv.fp} / FN {cv.fn} / TN {dd.fmt_int(cv.tn)}. "
+        f"В эксплуатации (доля инцидентов {dd.fmt_pct(c.pos / c.n, 0)}) AUC {dd.fmt_num(roc_o['auc'], 3)}, "
+        f"PR-AUC {dd.fmt_num(roc_o['ap'], 3)}; при τ — TP {dd.fmt_int(c.tp)} / FP {dd.fmt_int(c.fp)} / FN {c.fn} / "
+        f"TN {dd.fmt_int(c.tn)}. Низкая доля ложных срабатываний на ROC (FPR {dd.fmt_pct(1 - c.specificity)}) — это "
+        f"{dd.fmt_int(c.fp)} карточек FP в приоритете. PR-кривые выборок на дашборде разнесены по разным панелям: "
+        "доля инцидентов в них разная, и напрямую их не сравнивают.",
+        "",
         f"*Калибровка.* В эксплуатации модель в среднем пишет {dd.fmt_pct(lab['proba'].mean())}, а реальных инцидентов "
         f"{dd.fmt_pct(lab['y'].mean())}: "
         + (f"модель завышает оценку в {dd.fmt_num(cal_ratio, 1)} раза. На приёмке точки лежали почти на диагонали, в эксплуатации "
@@ -248,6 +264,9 @@ def build(store: dd.Store, f: dd.Filters | None = None) -> str:
         "- Реальный инцидент — вердикт «Решён», False Positive — вердикт «False Positive». Дубликаты, спам, «Не решён» и "
         "карточки без вердикта модель оценивает, но в метрики они не входят.",
         "- Область модели та же, что при обучении: есть правило корреляции SIEM, вендор не «Ручной ввод».",
+        "- Приёмка — всегда весь тестовый сплит окна: фильтры организации, критичности и месяца действуют только на "
+        "эксплуатацию. При пороге «что если» приёмка — тот же сплит с другим порогом, а не числа карточки модели; "
+        "на дашборде это подписано.",
         "- Приёмка — стратифицированная тестовая выборка окна: карточки одной кампании попадают и в обучение, и в тест, "
         "поэтому метрики приёмки оптимистичны. Карточка модели сама указывает на это и приводит контрольный прогон с разбиением "
         "по времени (PR-AUC 0,769).",

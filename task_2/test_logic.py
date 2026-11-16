@@ -170,6 +170,35 @@ class Filters(unittest.TestCase):
         self.assertEqual(set(d["crit"].astype(str)), {"Низкая"})
 
 
+class Acceptance(unittest.TestCase):
+    """Эталон приёмки не зависит от фильтров шапки (замечание ревью по методичке)."""
+    def setUp(self):
+        self.store = _store([_cards(seed=11, part=dd.VAL, month="2025-07"), _cards(seed=12, month="2025-09")])
+
+    def test_filters_do_not_cut_acceptance(self):
+        full = dd.acceptance(self.store, dd.Filters(policy="Рабочий порог"))
+        cut = dd.acceptance(self.store, dd.Filters(org="Орг-1", crit=["Низкая"], period="Сентябрь 2025",
+                                                   policy="Рабочий порог"))
+        self.assertEqual(len(full), len(cut))
+        self.assertEqual(dd.confusion(full).__dict__, dd.confusion(cut).__dict__)
+        self.assertLess(len(dd.apply_filters(self.store, dd.Filters(org="Орг-1"))),
+                        len(dd.apply_filters(self.store, dd.Filters())))       # эксплуатацию фильтры режут
+
+    def test_what_if_threshold_is_labelled(self):
+        self.assertEqual(dd.acceptance_label(self.store, dd.Filters(policy="Рабочий порог")), "на приёмке")
+        self.assertIn("при пороге", dd.acceptance_label(self.store, dd.Filters(policy="Находить 99 %")))
+
+    def test_curves_match_sklearn(self):
+        from sklearn.metrics import average_precision_score, roc_auc_score
+        d = _cards(n_pos=300, n_neg=2000, seed=13)
+        d.loc[d.index[:50], "proba"] = 0.5                                    # одинаковые оценки — ступеньки
+        c = dd.curves(d)
+        self.assertAlmostEqual(c["auc"], roc_auc_score(d["y"], d["proba"]), places=10)
+        self.assertAlmostEqual(c["ap"], average_precision_score(d["y"], d["proba"]), places=10)
+        self.assertAlmostEqual(c["prevalence"], 300 / 2300)
+        self.assertIsNone(dd.curves(d[d["y"] == 0]))
+
+
 class Segments(unittest.TestCase):
     def test_systematic_flag(self):
         # срез «Орг-плохая»: 30 % пропусков против ~2 % у остальных -> систематически
@@ -228,7 +257,8 @@ class ChartsAndTiles(unittest.TestCase):
             figs = [ch.fig_queue_waterfall(c), ch.fig_gains(val, d, 0.5), ch.fig_sankey(c),
                     ch.fig_agreement_monthly(mon), ch.fig_miss_monthly(mon, 0.05), ch.fig_missed_rules(d),
                     ch.fig_segments(dd.segment_table(d, "Организация", "miss"), "miss"), ch.fig_score_hist(d, 0.5),
-                    ch.fig_calibration(val, d), ch.fig_dumbbell([("x", 0.1, c.recall)]), ch.fig_drift(mon)]
+                    ch.fig_calibration(val, d), ch.fig_dumbbell([("x", 0.1, c.recall)]), ch.fig_drift(mon),
+                    ch.fig_roc_pr(val, d, 0.5)]
             for fig in figs:
                 self.assertIsNotNone(fig.to_dict())
 

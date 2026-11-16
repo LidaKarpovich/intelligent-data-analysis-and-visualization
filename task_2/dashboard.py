@@ -54,7 +54,10 @@ def caption(store: dd.Store, f: dd.Filters, oper: pd.DataFrame) -> str:
             else f"эксплуатация: {f.period.lower()}")
     n_lab = int((oper["y"] >= 0).sum())
     # метрики, каскад и разгрузка очереди считаются только по карточкам с вердиктом — показываем обе базы
-    return (f"{span} · приёмка: тест окна {dd.fmt_date(p['train'][0])} — {dd.fmt_date(p['train'][1])} "
+    acc = f"приёмка: весь тест-сплит окна {dd.fmt_date(p['train'][0])} — {dd.fmt_date(p['train'][1])} без фильтров"
+    if not dd.is_default_policy(store, f):
+        acc += f", пересчитан при пороге {dd.fmt_num(dd.threshold_of(store, f), 4)} (не карточка модели)"
+    return (f"{span} · {acc} "
             f"· порог {dd.fmt_num(dd.threshold_of(store, f), 4)} · {dd.fmt_int(len(oper))} "
             f"{dd.plural(len(oper), ('карточка', 'карточки', 'карточек'))}: с вердиктом {dd.fmt_int(n_lab)}, "
             f"без вердикта {dd.fmt_int(len(oper) - n_lab)} — вне метрик")
@@ -65,11 +68,23 @@ def view_segments(oper: pd.DataFrame, by: str, metric_label: str) -> dict:
     return dict(fig_seg=ch.fig_segments(dd.segment_table(oper, by, metric), metric))
 
 
+def dumbbell_rows(cv: dd.Confusion, c: dd.Confusion) -> list:
+    """Показатели, которые можно сравнивать между выборками с разной долей инцидентов (методичка, 5.1):
+    recall и согласие на FP от доли инцидентов не зависят; precision зависит — её здесь нет.
+    Доля инцидентов в потоке — контекст: показывает, насколько выборки различаются."""
+    nan = float("nan")
+    return [("Найдено реальных инцидентов (recall)", cv.recall, c.recall),
+            ("Согласие с аналитиком на FP", cv.specificity, c.specificity),
+            ("Очередь разгружена (низкий приоритет)", cv.low_share, c.low_share),
+            ("Доля инцидентов в потоке", cv.pos / cv.n if cv.n else nan, c.pos / c.n if c.n else nan)]
+
+
 def compute_all(store: dd.Store, f: dd.Filters, ctl: dict) -> dict:
     thr = dd.threshold_of(store, f)
-    oper = dd.apply_filters(store, f)                                  # эксплуатация (с учётом месяца)
-    val = dd.apply_filters(store, f, part=dd.VAL)                      # приёмка — эталон для сравнения
-    mon = dd.monthly(dd.apply_filters(store, f, part=None, by_period=False))
+    oper = dd.apply_filters(store, f)            # эксплуатация: фильтры шапки (месяц, организация, критичность)
+    val = dd.acceptance(store, f)                # приёмка: всегда весь тест-сплит, фильтры шапки не действуют
+    acc = dd.acceptance_label(store, f)          # «на приёмке» или «на приёмке при пороге …» для «что если»
+    mon = dd.timeline(store, f)
     mon_oper = mon[mon["part"] == dd.OPER] if len(mon) else mon
     sel = dd.selected_month(store, f)
     c, cv = dd.confusion(oper), dd.confusion(val)
@@ -78,28 +93,23 @@ def compute_all(store: dd.Store, f: dd.Filters, ctl: dict) -> dict:
     out = dict(period_caption=caption(store, f, oper))
     # 1 · Итоги
     out |= dict(fig_waterfall=ch.fig_queue_waterfall(c), fig_gains=ch.fig_gains(val, oper, thr))
-    out |= kp.results(oper, c, cv, tm, val)
+    out |= kp.results(oper, c, cv, tm, val, acc=acc)
     # 2 · Согласие
     out |= dict(fig_sankey=ch.fig_sankey(c), fig_agree=ch.fig_agreement_monthly(mon, sel))
-    out |= kp.agreement(oper, c, cv)
+    out |= kp.agreement(oper, c, cv, acc=acc)
     # 3 · Пропуски
-    out |= dict(fig_miss=ch.fig_miss_monthly(mon, tm, sel), fig_missed_rules=ch.fig_missed_rules(oper))
-    out |= kp.misses(oper, c, mon_oper, thr, tm, val)
+    out |= dict(fig_miss=ch.fig_miss_monthly(mon, tm, sel, ref_label=acc), fig_missed_rules=ch.fig_missed_rules(oper))
+    out |= kp.misses(oper, c, mon_oper, thr, tm, val, acc=acc)
     # 4 · Зоны ошибок
     out |= view_segments(oper, ctl["seg_by"], ctl["seg_metric"])
     out |= dict(fig_hist=ch.fig_score_hist(oper, thr))
-    out |= kp.errors(oper, c, cv)
+    out |= kp.errors(oper, c, cv, acc=acc)
     # 5 · Можно ли верить
-    out |= dict(fig_cal=ch.fig_calibration(val, oper), fig_drift=ch.fig_drift(mon, sel),
-                fig_dumbbell=ch.fig_dumbbell([
-                    ("Найдено реальных инцидентов", cv.recall, c.recall),
-                    ("Очередь разгружена (низкий приоритет)", cv.low_share, c.low_share),
-                    ("Точность приоритета: доля инцидентов", cv.precision, c.precision),
-                    ("Согласие с аналитиком на FP", cv.specificity, c.specificity),
-                    ("Доля инцидентов в потоке", cv.pos / cv.n if cv.n else float("nan"),
-                     c.pos / c.n if c.n else float("nan")),
-                ]))
-    out |= kp.trust(oper, val, mon_oper, store.meta)
+    val_title = "Приёмка" if dd.is_default_policy(store, f) else f"Приёмка, порог {dd.fmt_num(thr, 4)}"
+    out |= dict(fig_rocpr=ch.fig_roc_pr(val, oper, thr, val_title),
+                fig_cal=ch.fig_calibration(val, oper), fig_drift=ch.fig_drift(mon, sel),
+                fig_dumbbell=ch.fig_dumbbell(dumbbell_rows(cv, c)))
+    out |= kp.trust(oper, val, mon_oper, store.meta, acc=acc)
     return out
 
 
@@ -219,6 +229,7 @@ errors_page = "\n\n".join([
 trust_page = "\n\n".join([
     question("Можно ли верить оценке модели и не устарела ли она?"),
     kp.markup("trust"),
+    card("Насколько модель различает инциденты и FP: ROC и PR с рабочим порогом", "fig_rocpr", 640),
     two(card("Если модель пишет «30 %», сколько на самом деле инцидентов", "fig_cal", 400),
         card("Что изменилось между приёмкой и эксплуатацией", "fig_dumbbell", 400)),
     card("Когда модель начала устаревать", "fig_drift", 480),
