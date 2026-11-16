@@ -19,7 +19,7 @@ import dashboard_data as dd
 OUT = Path(__file__).resolve().parent / "REPORT.md"
 
 CHARTS = [
-    ("1 · Итоги", "Сколько карточек модель убрала из очереди и чем за это заплатили", "Каскадная (waterfall)", "waterfall",
+    ("1 · Итоги", "Карточки с вердиктом: сколько модель убрала из очереди и чем за это заплатили", "Каскадная (waterfall)", "waterfall",
      "круговая: не показывает последовательность «всё → убрали → осталось» и теряет маленький, но важный шаг пропусков"),
     ("1 · Итоги", "Сколько очереди надо разобрать, чтобы найти инциденты", "Кривая поиска (cumulative gains)", "gains",
      "ROC-кривая: FPR непонятен руководителю, а вопрос «сколько карточек разобрать» она не отвечает"),
@@ -105,7 +105,7 @@ def build(store: dd.Store, f: dd.Filters | None = None) -> str:
                         f"против {dd.fmt_pct(cv.low_share, 0)} на приёмке.")
     else:
         queue_bullet = (f"- **Очередь модель разгружает почти как на приёмке:** откладывает {dd.fmt_pct(c.low_share, 0)} "
-                        f"карточек (на приёмке {dd.fmt_pct(cv.low_share, 0)}). ")
+                        f"карточек с вердиктом (на приёмке {dd.fmt_pct(cv.low_share, 0)}). ")
         if c.precision < cv.precision / 1.5:
             queue_bullet += (f"Но доля реальных инцидентов в приоритетной очереди упала: {dd.fmt_pct(c.precision, 0)} "
                              f"против {dd.fmt_pct(cv.precision, 0)} на приёмке.")
@@ -164,7 +164,9 @@ def build(store: dd.Store, f: dd.Filters | None = None) -> str:
         f"*Каскадная диаграмма.* Из {dd.fmt_int(c.n)} карточек с вердиктом модель отложила {dd.fmt_int(c.fn + c.tn)} "
         f"({dd.fmt_pct(c.low_share)}): {dd.fmt_int(c.tn)} верно (False Positive) и {c.fn} ошибочно (реальные инциденты). "
         f"В приоритете осталось {dd.fmt_int(c.tp + c.fp)} карточек, и инцидентом в них оказывается каждая "
-        f"{every(c.precision)}-я ({dd.fmt_pct(c.precision)}); на приёмке — {dd.fmt_pct(cv.precision)}.",
+        f"{every(c.precision)}-я ({dd.fmt_pct(c.precision)}); на приёмке — {dd.fmt_pct(cv.precision)}. "
+        f"Ещё {dd.fmt_int((oper['y'] < 0).sum())} карточек без вердикта модель тоже оценила, но в каскад и в долю "
+        "разгрузки они не входят: сверить их решение не с чем.",
         "",
         f"*Кривая поиска.* Если разбирать очередь сверху вниз по оценке модели, первые 20 % карточек содержат "
         f"{dd.fmt_pct(g20, 0)} реальных инцидентов в эксплуатации против {dd.fmt_pct(g20v, 0)} на приёмке (без модели — 20 %). "

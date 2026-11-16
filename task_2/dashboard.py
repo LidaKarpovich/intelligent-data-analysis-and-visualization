@@ -52,9 +52,12 @@ def caption(store: dd.Store, f: dd.Filters, oper: pd.DataFrame) -> str:
     p = store.meta["periods"]
     span = (f"эксплуатация {dd.fmt_date(p['oper'][0])} — {dd.fmt_date(p['oper'][1])}" if f.period == dd.PERIOD_ALL
             else f"эксплуатация: {f.period.lower()}")
+    n_lab = int((oper["y"] >= 0).sum())
+    # метрики, каскад и разгрузка очереди считаются только по карточкам с вердиктом — показываем обе базы
     return (f"{span} · приёмка: тест окна {dd.fmt_date(p['train'][0])} — {dd.fmt_date(p['train'][1])} "
             f"· порог {dd.fmt_num(dd.threshold_of(store, f), 4)} · {dd.fmt_int(len(oper))} "
-            f"{dd.plural(len(oper), ('карточка', 'карточки', 'карточек'))}")
+            f"{dd.plural(len(oper), ('карточка', 'карточки', 'карточек'))}: с вердиктом {dd.fmt_int(n_lab)}, "
+            f"без вердикта {dd.fmt_int(len(oper) - n_lab)} — вне метрик")
 
 
 def view_segments(oper: pd.DataFrame, by: str, metric_label: str) -> dict:
@@ -81,11 +84,11 @@ def compute_all(store: dd.Store, f: dd.Filters, ctl: dict) -> dict:
     out |= kp.agreement(oper, c, cv)
     # 3 · Пропуски
     out |= dict(fig_miss=ch.fig_miss_monthly(mon, tm, sel), fig_missed_rules=ch.fig_missed_rules(oper))
-    out |= kp.misses(oper, c, mon_oper, thr, tm)
+    out |= kp.misses(oper, c, mon_oper, thr, tm, val)
     # 4 · Зоны ошибок
     out |= view_segments(oper, ctl["seg_by"], ctl["seg_metric"])
     out |= dict(fig_hist=ch.fig_score_hist(oper, thr))
-    out |= kp.errors(oper, c)
+    out |= kp.errors(oper, c, cv)
     # 5 · Можно ли верить
     out |= dict(fig_cal=ch.fig_calibration(val, oper), fig_drift=ch.fig_drift(mon, sel),
                 fig_dumbbell=ch.fig_dumbbell([
@@ -185,7 +188,7 @@ root_page = """
 results_page = "\n\n".join([
     question("Что модель дала SOC за период эксплуатации?"),
     kp.markup("results"),
-    two(card("Сколько карточек модель убрала из очереди и чем за это заплатили", "fig_waterfall", 380),
+    two(card("Карточки с вердиктом: сколько модель убрала из очереди и чем за это заплатили", "fig_waterfall", 380),
         card("Сколько очереди надо разобрать, чтобы найти инциденты", "fig_gains", 380)),
 ])
 

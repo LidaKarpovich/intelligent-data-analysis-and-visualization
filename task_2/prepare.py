@@ -85,6 +85,11 @@ def first_item(x) -> str | None:
     return x
 
 
+def rule_of(cards: pd.DataFrame) -> pd.Series:
+    """Правило SIEM карточки — из «Правила корреляции SIEM», того же поля, что задаёт область модели."""
+    return cards["Правило корреляции SIEM"].map(first_item)
+
+
 def needed_columns(advisor: CourseAdvisor, available: list[str]) -> list[str]:
     cfg = advisor.cfg
     cols = set(EXTRA_COLS) | set(advisor.data_mod.LIST_LEN_SOURCE)
@@ -161,7 +166,7 @@ def build_frame(cards: pd.DataFrame, proba: np.ndarray, part: str, rule_counts: 
         "verdict": cards["Вердикт"].to_numpy(),
         "y": cards["Вердикт"].map(LABELS).fillna(-1).astype("int8").to_numpy(),
         "proba": proba,
-        "rule": cards["Наименование"].to_numpy(),
+        "rule": rule_of(cards).to_numpy(),
         "inc_type": cards["Тип инцидента"].map(first_item).to_numpy(),
         "irp": cards["Пиктограмма IRP"].map(first_item).to_numpy(),
         "crit": cards["Критичность"].map(first_item).to_numpy(),
@@ -196,7 +201,12 @@ def main(path: Path, course_dir: Path) -> None:
     print(f"Эксплуатация: {len(oper):,} карточек в области модели "
           f"(вне области: {int(((created >= OPER_START) & ~scope).sum())})")
 
-    rule_counts = raw.loc[ids.isin(split["train"]), "Наименование"].value_counts()
+    # частота правила в обучении — по «Правилу корреляции SIEM»; модель видит «Наименование»
+    # (freq_Наименование), поэтому проверяем, что это одно и то же правило
+    rules = rule_of(raw)
+    same_rule = float((rules == raw["Наименование"])[rules.notna()].mean())
+    print(f"«Правило корреляции SIEM» совпадает с «Наименованием» у {same_rule:.2%} карточек")
+    rule_counts = rules[ids.isin(split["train"])].value_counts()
     p_test = advisor.predict_proba(test)
     p_oper = advisor.predict_proba(oper)
     scored = pd.concat([build_frame(test, p_test, "Приёмка", rule_counts),
@@ -232,7 +242,7 @@ def main(path: Path, course_dir: Path) -> None:
         "n_train": len(split["train"]),
         "pos_rate_train": float(raw.loc[ids.isin(split["train"]), "Вердикт"].eq("Решён").mean()),
         "threshold": tau, "target_miss": m_test["miss"], "target_recall": m_test["recall"],
-        "policies": policies, "default_policy": tau_label,
+        "policies": policies, "default_policy": tau_label, "rule_field_match": same_rule,
         "val_metrics": m_test, "oper_metrics": m_oper, "published_test_match": same,
     }
     (AGG_DIR / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")

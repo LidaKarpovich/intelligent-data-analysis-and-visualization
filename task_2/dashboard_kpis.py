@@ -14,6 +14,9 @@ import dashboard_data as dd
 
 DASH = "—"
 LOW_SHARE_DROP = 0.5    # разгрузка очереди упала более чем вдвое против приёмки — сигнал
+AGREE_DROP = 0.05       # согласие с аналитиком (на инцидентах или на FP) ниже приёмки больше чем на 5 п. п.
+                        # даже с учётом 95 %-ного интервала — сигнал
+HIGH_CRIT = ["Высокая", "Критическая"]
 AUC_DROP = 0.05         # AUC ниже приёмки больше чем на 0,05 — сигнал
 OVERCONF = 1.5          # модель завышает долю инцидентов в 1,5 раза и больше — сигнал
 CONFIDENT_MISS = 0.5    # больше половины пропусков далеко от порога — сигнал (сдвиг порога не поможет)
@@ -67,6 +70,11 @@ def _top_share(d: pd.DataFrame, share: float = TOP_SHARE) -> float:
     return float(np.interp(share, g["x"], g["y"])) if len(g) else np.nan
 
 
+def below_acceptance(k: int, n: int, ref: float, drop: float = AGREE_DROP) -> bool:
+    """Доля k/n ниже эталона приёмки ref больше чем на drop даже по верхней границе интервала Уилсона."""
+    return bool(n and np.isfinite(ref) and dd.wilson(k, n)[1] < ref - drop)
+
+
 def results(oper: pd.DataFrame, c: dd.Confusion, cv: dd.Confusion, target_miss: float,
             val: pd.DataFrame | None = None) -> dict:
     if c.n == 0:
@@ -79,7 +87,7 @@ def results(oper: pd.DataFrame, c: dd.Confusion, cv: dd.Confusion, target_miss: 
                  alert=dd.wilson(c.fn, c.pos)[0] > target_miss)       # хуже приёмки с учётом случайности
     dropped = cv.n and c.low_share < cv.low_share * LOW_SHARE_DROP
     out |= _tile("r_low", dd.fmt_pct(c.low_share, 0),
-                 f"{dd.fmt_int(c.fn + c.tn)} карточек · на приёмке {dd.fmt_pct(cv.low_share, 0)}",
+                 f"{dd.fmt_int(c.fn + c.tn)} из {dd.fmt_int(c.n)} с вердиктом · на приёмке {dd.fmt_pct(cv.low_share, 0)}",
                  alert=bool(dropped))
     return out
 
@@ -93,14 +101,16 @@ def agreement(oper: pd.DataFrame, c: dd.Confusion, cv: dd.Confusion) -> dict:
     ratio = c.neg / c.pos if c.pos else np.nan
     out |= _tile("a_all", dd.fmt_pct(c.agreement),
                  f"FP в {dd.fmt_num(ratio, 1)} раза больше инцидентов" if c.pos else "")
-    out |= _tile("a_inc", dd.fmt_pct(c.recall), f"на приёмке {dd.fmt_pct(cv.recall)}", kind="kpi-real")
+    out |= _tile("a_inc", dd.fmt_pct(c.recall), f"на приёмке {dd.fmt_pct(cv.recall)}",
+                 alert=below_acceptance(c.tp, c.pos, cv.recall), kind="kpi-real")
     out |= _tile("a_fp", dd.fmt_pct(c.specificity), f"на приёмке {dd.fmt_pct(cv.specificity)}",
-                 alert=bool(cv.n and c.specificity < cv.specificity * LOW_SHARE_DROP), kind="kpi-fp")
+                 alert=below_acceptance(c.tn, c.neg, cv.specificity), kind="kpi-fp")
     return out
 
 
 # ---------------------------------------------------------------- 3. Пропуски
-def misses(oper: pd.DataFrame, c: dd.Confusion, mon_oper: pd.DataFrame, thr: float, target_miss: float) -> dict:
+def misses(oper: pd.DataFrame, c: dd.Confusion, mon_oper: pd.DataFrame, thr: float, target_miss: float,
+           val: pd.DataFrame | None = None) -> dict:
     if c.pos == 0:
         return empty("misses")
     lo, hi = dd.wilson(c.fn, c.pos)
@@ -112,11 +122,18 @@ def misses(oper: pd.DataFrame, c: dd.Confusion, mon_oper: pd.DataFrame, thr: flo
         out |= _tile("m_months", f"{len(bad)} из {len(mon_oper)}", note, alert=len(bad) > 0)
     else:
         out |= _tile("m_months", DASH)
-    miss = oper[(oper["y"] == 1) & ~oper["pred"]]
-    high = int(miss["crit"].isin(["Высокая", "Критическая"]).sum())
-    out |= _tile("m_high", dd.fmt_int(high),
-                 f"из {dd.fmt_int(len(miss))} {dd.plural(len(miss), ('пропуска', 'пропусков', 'пропусков'))}",
-                 alert=high > 0)
+    # пропуски высокой и критической критичности: доля среди таких инцидентов против приёмки
+    inc_h = oper[(oper["y"] == 1) & oper["crit"].isin(HIGH_CRIT)]
+    fn_h = int((~inc_h["pred"]).sum())
+    ref_h = target_miss
+    if val is not None:
+        val_h = val[(val["y"] == 1) & val["crit"].isin(HIGH_CRIT)]
+        if len(val_h) >= dd.MIN_POS:                    # на малой приёмке берём общий уровень пропусков
+            ref_h = float((~val_h["pred"]).mean())
+    out |= _tile("m_high", dd.fmt_int(fn_h),
+                 f"{fn_h} из {dd.fmt_int(len(inc_h))} ({dd.fmt_pct(fn_h / len(inc_h), 0) if len(inc_h) else DASH}) · "
+                 f"на приёмке {dd.fmt_pct(ref_h)}",
+                 alert=bool(len(inc_h) and dd.wilson(fn_h, len(inc_h))[0] > ref_h))
     near, n = dd.near_threshold_share(oper, thr)
     far = n - near                                       # оценка ниже половины порога: сдвиг порога не вернёт
     out |= _tile("m_near", dd.fmt_pct(far / n, 0) if n else DASH,
@@ -126,7 +143,7 @@ def misses(oper: pd.DataFrame, c: dd.Confusion, mon_oper: pd.DataFrame, thr: flo
 
 
 # ---------------------------------------------------------------- 4. Зоны ошибок
-def errors(oper: pd.DataFrame, c: dd.Confusion) -> dict:
+def errors(oper: pd.DataFrame, c: dd.Confusion, cv: dd.Confusion | None = None) -> dict:
     if c.n == 0:
         return empty("errors")
     worst = None
@@ -163,7 +180,9 @@ def errors(oper: pd.DataFrame, c: dd.Confusion) -> dict:
                      alert=ru > 2 * c.miss)
     else:
         out |= _tile("e_new", DASH, "нет инцидентов новых правил")
-    out |= _tile("e_fp", dd.fmt_pct(1 - c.specificity, 0), f"{dd.fmt_int(c.fp)} карточек",
+    out |= _tile("e_fp", dd.fmt_pct(1 - c.specificity, 0), f"{dd.fmt_int(c.fp)} карточек · на приёмке {dd.fmt_pct(1 - cv.specificity, 0)}"
+                 if cv is not None and cv.neg else f"{dd.fmt_int(c.fp)} карточек",
+                 alert=bool(cv is not None and below_acceptance(c.tn, c.neg, cv.specificity)),
                  kind="kpi-fp")
     return out
 

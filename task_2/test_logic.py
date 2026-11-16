@@ -247,6 +247,25 @@ class ChartsAndTiles(unittest.TestCase):
         empty = kp.results(d.iloc[0:0], dd.Confusion(), dd.Confusion(), 0.05)
         self.assertTrue(all(v == kp.DASH for k, v in empty.items() if k.endswith("_v")))
 
+    def test_agreement_alert_threshold(self):
+        # приёмка 96 %: падение до 70 % — сигнал, до 95 % — нет (порог не «вдвое», а 5 п. п. с интервалом)
+        cv = dd.Confusion(tp=390, fn=24, fp=107, tn=2652)
+        drop = kp.agreement(pd.DataFrame({"y": [0]}), dd.Confusion(tp=900, fn=100, fp=3000, tn=7000), cv)
+        same = kp.agreement(pd.DataFrame({"y": [0]}), dd.Confusion(tp=940, fn=60, fp=450, tn=9550), cv)
+        self.assertIn("kpi-alert", drop["a_fp_c"])
+        self.assertNotIn("kpi-alert", same["a_fp_c"])
+
+    def test_high_crit_alert_by_share_not_by_one_case(self):
+        def cards(n_inc, n_miss, crit="Высокая"):
+            return pd.DataFrame({"y": [1] * n_inc, "pred": [False] * n_miss + [True] * (n_inc - n_miss),
+                                 "crit": crit, "proba": [0.001] * n_miss + [0.9] * (n_inc - n_miss)})
+        val = cards(200, 10)                                         # на приёмке 5 %
+        one = kp.misses(cards(400, 1), dd.Confusion(tp=399, fn=1), pd.DataFrame(), 0.02, 0.05, val)
+        many = kp.misses(cards(400, 80), dd.Confusion(tp=320, fn=80), pd.DataFrame(), 0.02, 0.05, val)
+        self.assertNotIn("kpi-alert", one["m_high_c"])                # единичный пропуск — не сигнал
+        self.assertIn("kpi-alert", many["m_high_c"])                 # 20 % против 5 % — сигнал
+        self.assertIn("80 из 400", many["m_high_n"])
+
     def test_every_chart_has_why(self):
         import report
         keys = {row[3] for row in report.CHARTS}

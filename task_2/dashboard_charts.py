@@ -145,7 +145,7 @@ def fig_queue_waterfall(c: dd.Confusion) -> go.Figure:
     if c.n == 0:
         return empty()
     keep = c.tp + c.fp
-    x = ["Все карточки<br>с вердиктом", "Отложены верно:<br>False Positive",
+    x = ["Карточки с вердиктом<br>«Решён» или FP", "Отложены верно:<br>False Positive",
          "Отложены ошибочно:<br>реальные инциденты", "Осталось<br>в приоритете"]
     bases = [0, c.n - c.tn, keep, 0]
     heights = [c.n, c.tn, c.fn, keep]
