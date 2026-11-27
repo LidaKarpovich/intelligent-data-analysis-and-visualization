@@ -168,6 +168,7 @@ class Store:
     # Предсобранный пул карточек с 73 SHAP для быстрого Violin по группе похожих
     shap_pool_mat: np.ndarray
     shap_pool_meta: pd.DataFrame
+    points_tau: pd.DataFrame | None = None
 
 
 def load(agg_dir: Path = AGG_DIR) -> Store:
@@ -192,6 +193,9 @@ def load(agg_dir: Path = AGG_DIR) -> Store:
     pool = pd.concat([p_sub, b_sub], ignore_index=True).drop_duplicates(subset=["EntityId"], keep="first").reset_index(drop=True)
     pool_mat = pool[FEATURE_ORDER_73].to_numpy(dtype=np.float64)
     pool_meta = pool[["EntityId", "y_true", "proba", "outcome", "source"]].copy()
+    
+    pts_path = agg_dir / "map_points_tau.parquet"
+    points_tau = pd.read_parquet(pts_path) if pts_path.exists() else None
 
     return Store(
         meta=meta,
@@ -216,7 +220,42 @@ def load(agg_dir: Path = AGG_DIR) -> Store:
         verification=read("verification_team5"),
         shap_pool_mat=pool_mat,
         shap_pool_meta=pool_meta,
+        points_tau=points_tau,
     )
+
+
+def hex_at_threshold(store: Store, space_key: str, tau: float) -> tuple[pd.DataFrame, bool]:
+    """Пересчитывает pred_rate и err_rate для гекс-ячеек при текущем τ (если есть map_points_tau.parquet)."""
+    base_hx = {"shap": store.hex_shap, "pca": store.hex_pca, "tsne": store.hex_tsne}[space_key]
+    if base_hx.empty or store.points_tau is None or "hq" not in base_hx.columns:
+        return base_hx, False
+
+    hq_col, hr_col = f"hq_{space_key}", f"hr_{space_key}"
+    pts = store.points_tau
+    if hq_col not in pts.columns:
+        return base_hx, False
+
+    valid = pts[hq_col].to_numpy() > -10**8
+    sub = pts.loc[valid, [hq_col, hr_col, "y", "proba"]].copy()
+    sub["pred"] = (sub["proba"].to_numpy() >= tau).astype(np.int8)
+    y = sub["y"].to_numpy()
+    sub["is_lab"] = (y >= 0).astype(np.int8)
+    sub["is_err"] = ((y >= 0) & (sub["pred"].to_numpy() != y)).astype(np.int8)
+
+    agg = sub.groupby([hq_col, hr_col], sort=False).agg(
+        n_tot=("pred", "size"),
+        n_pred=("pred", "sum"),
+        n_lab=("is_lab", "sum"),
+        n_err=("is_err", "sum"),
+    ).reset_index().rename(columns={hq_col: "hq", hr_col: "hr"})
+
+    agg["pred_rate_dyn"] = agg["n_pred"] / np.maximum(agg["n_tot"], 1)
+    agg["err_rate_dyn"] = np.where(agg["n_lab"] > 0, agg["n_err"] / np.maximum(agg["n_lab"], 1), np.nan)
+
+    merged = base_hx.merge(agg[["hq", "hr", "pred_rate_dyn", "err_rate_dyn"]], on=["hq", "hr"], how="left")
+    merged["pred_rate"] = merged["pred_rate_dyn"].fillna(merged["pred_rate"])
+    merged["err_rate"] = merged["err_rate_dyn"].fillna(merged["err_rate"])
+    return merged.drop(columns=["pred_rate_dyn", "err_rate_dyn"]), True
 
 
 # ---------------------------------------------------------------- селекторы и срезы

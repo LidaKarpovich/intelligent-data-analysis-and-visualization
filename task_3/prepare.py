@@ -600,6 +600,24 @@ def hexbin_aggregate(
     return pd.DataFrame(rows)
 
 
+def _hex_assign(coords: np.ndarray, gridsize: int) -> tuple[np.ndarray, np.ndarray]:
+    x, yv = coords[:, 0].astype(np.float64), coords[:, 1].astype(np.float64)
+    xmin, xmax = float(x.min()), float(x.max())
+    ymin, ymax = float(yv.min()), float(yv.max())
+    u = (x - xmin) / max(xmax - xmin, 1e-9) * gridsize
+    v = (yv - ymin) / max(ymax - ymin, 1e-9) * gridsize
+    qf = (2.0 / 3.0) * u
+    rf = (-1.0 / 3.0) * u + (np.sqrt(3.0) / 3.0) * v
+    sf = -qf - rf
+    rq, rr, rs = np.round(qf), np.round(rf), np.round(sf)
+    dq, dr, ds = np.abs(rq - qf), np.abs(rr - rf), np.abs(rs - sf)
+    m_q = (dq > dr) & (dq > ds)
+    m_r = (~m_q) & (dr > ds)
+    rq = np.where(m_q, -rr - rs, rq).astype(np.int32)
+    rr = np.where(m_r, -rq - rs, rr).astype(np.int32)
+    return rq, rr
+
+
 def build_similarity_maps(
     shap_73_all: np.ndarray,
     X_all: np.ndarray,
@@ -668,6 +686,21 @@ def build_similarity_maps(
         )
     else:
         hex_tsne = pd.DataFrame(columns=hex_shap.columns)
+    
+    hq_sh, hr_sh = _hex_assign(xy_shap, 34)
+    hq_pc, hr_pc = _hex_assign(xy_pca, 34)
+    hq_ts = np.full(len(y_all), -10**9, dtype=np.int32)
+    hr_ts = np.full(len(y_all), -10**9, dtype=np.int32)
+    if run_tsne:
+        hq_ts[sub_idx], hr_ts[sub_idx] = _hex_assign(xy_tsne, 30)
+
+    points_tau_df = pd.DataFrame({
+        "hq_shap": hq_sh, "hr_shap": hr_sh,
+        "hq_pca": hq_pc, "hr_pca": hr_pc,
+        "hq_tsne": hq_ts, "hr_tsne": hr_ts,
+        "y": y_all.astype(np.int8),
+        "proba": p_all.astype(np.float32),
+    })
 
     # Профили кластеров (для подписей центроидов на карте)
     cl_rows = []
@@ -748,6 +781,7 @@ def build_similarity_maps(
         "map_hex_shap": hex_shap,
         "map_hex_pca": hex_pca,
         "map_hex_tsne": hex_tsne,
+        "map_points_tau": points_tau_df,
         "map_clusters": clusters_df,
         "map_focus_team5": focus_df,
         "neighbors_team5": neighbors_df,

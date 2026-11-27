@@ -85,6 +85,15 @@ verif_period = VERIF_PER_LOV[0]
 case_summary_text = ""
 
 
+ALE_Y_LOV = ["Автофокус (ALE/PDP)", "Полная шкала (0–100 %)"]
+VERIF_SCALE_LOV = ["Автофокус по ДИ", "Полная шкала (0–100 %)"]
+VERIF_CI_LOV = ["С 95 % ДИ Уилсона", "Без усов (только точки)"]
+
+ale_y_mode = ALE_Y_LOV[0]
+verif_scale = VERIF_SCALE_LOV[0]
+verif_ci_mode = VERIF_CI_LOV[0]
+
+
 # ---------------------------------------------------------------- расчёт представлений
 def current_tau(preset: str, l10: float) -> float:
     p_val = dd.PRESETS.get(preset)
@@ -129,7 +138,8 @@ def view_similar(store: dd.Store, eid: int, space: str, color: str, grp_mode: st
     )
 
 
-def view_global(store: dd.Store, sample: str, n_lbl: str, c_per: str, c_lbl: str, eid: int) -> dict:
+def view_global(store: dd.Store, sample: str, n_lbl: str, c_per: str, c_lbl: str, eid: int,
+                y_mode: str = ALE_Y_LOV[0]) -> dict:
     nf = NUM_LABEL_TO_COL[n_lbl]
     cf = CAT_LABEL_TO_COL[c_lbl]
     return (
@@ -137,7 +147,7 @@ def view_global(store: dd.Store, sample: str, n_lbl: str, c_per: str, c_lbl: str
         | dict(
             fig_beeswarm=ch.fig_beeswarm(store, sample),
             fig_global_dot=ch.fig_global_dot(store),
-            fig_ale=ch.fig_ale_pdp_ice(store, nf, c_per, eid, show_ice=True),
+            fig_ale=ch.fig_ale_pdp_ice(store, nf, c_per, eid, show_ice=True, y_mode=y_mode),
             fig_gpdp=ch.fig_cat_gpdp(store, cf),
         )
     )
@@ -154,7 +164,8 @@ def view_drift(store: dd.Store, sort_by: str, f_lbl: str) -> dict:
     )
 
 
-def view_cases(store: dd.Store, case_name: str, period: str, tau: float) -> dict:
+def view_cases(store: dd.Store, case_name: str, period: str, tau: float,
+               scale_mode: str = VERIF_SCALE_LOV[0], ci_mode: str = VERIF_CI_LOV[0]) -> dict:
     info = dd.CURATED_CASES[case_name]
     eid = int(info["EntityId"])
     txt = f"{info['verdict_tag']} — {info['why_case']} Рекомендация: {info['action']}."
@@ -162,7 +173,7 @@ def view_cases(store: dd.Store, case_name: str, period: str, tau: float) -> dict
         kp.page_cases(store, eid, period, tau)
         | dict(
             case_summary_text=txt,
-            fig_verify=ch.fig_verify_wilson(store, eid, period),
+            fig_verify=ch.fig_verify_wilson(store, eid, period, scale_mode=scale_mode, show_ci=ci_mode.startswith("С")),
             tbl_verify=dd.verification_table(store, eid, period),
         )
     )
@@ -212,8 +223,8 @@ def _refresh_card_and_similar(state, tau: float):
     )
     vals |= view_card(STORE, eid, tau, int(state.top_n), state.detail_lvl)
     vals |= view_similar(STORE, eid, state.map_space, state.map_color, state.group_mode, tau)
-    vals |= view_global(STORE, state.bw_sample, state.num_feat_lbl, state.curve_period, state.cat_feat_lbl, eid)
-    vals |= view_cases(STORE, state.case_sel, state.verif_period, tau)
+    vals |= view_global(STORE, state.bw_sample, state.num_feat_lbl, state.curve_period, state.cat_feat_lbl, eid, state.ale_y_mode)
+    vals |= view_cases(STORE, state.case_sel, state.verif_period, tau, state.verif_scale, state.verif_ci_mode)
     _assign(state, vals)
 
 
@@ -271,7 +282,8 @@ def on_similar_ctl(state, var_name=None, value=None):
 
 
 def on_global_ctl(state, var_name=None, value=None):
-    _assign(state, view_global(STORE, state.bw_sample, state.num_feat_lbl, state.curve_period, state.cat_feat_lbl, _cur_eid(state)))
+    _assign(state, view_global(STORE, state.bw_sample, state.num_feat_lbl, state.curve_period,
+                               state.cat_feat_lbl, _cur_eid(state), state.ale_y_mode))
 
 
 def on_drift_ctl(state, var_name=None, value=None):
@@ -280,7 +292,8 @@ def on_drift_ctl(state, var_name=None, value=None):
 
 def on_case_ctl(state, var_name=None, value=None):
     tau = current_tau(state.tau_preset, state.log10_tau)
-    _assign(state, view_cases(STORE, state.case_sel, state.verif_period, tau))
+    _assign(state, view_cases(STORE, state.case_sel, state.verif_period, tau,
+                              state.verif_scale, state.verif_ci_mode))
 
 
 def on_open_case_in_card(state, *args):
@@ -382,7 +395,7 @@ card_page = "\n\n".join([
     kp.markup("card"),
     card(
         "Вклад признаков в решение модели (SHAP Waterfall · log-odds; объясняет модель, не причинность)",
-        "fig_card_wf", 460,
+        "fig_card_wf", 620,
         controls=(
             "<|part|class_name=slider-box-sm|\n"
             "<|Top-N признаков: {top_n}|text|class_name=slider-label|>\n"
@@ -400,7 +413,7 @@ similar_page = "\n\n".join([
     kp.markup("similar"),
     card(
         "Карта похожести карточек: гексагональная плотность области модели (~41,7 тыс.) + команда 5 и 20-NN",
-        "fig_hexmap", 490,
+        "fig_hexmap", 540,
         controls=(
             "<|{map_space}|selector|lov={SPACE_LOV}|dropdown|label=Пространство проекции|on_change=on_similar_ctl|>\n\n"
             "<|{map_color}|selector|lov={COLOR_LOV}|dropdown|label=Окраска ячеек Hexbin|on_change=on_similar_ctl|>"
@@ -434,12 +447,13 @@ global_page = "\n\n".join([
     two(
         card(
             "Числовой признак: ALE, PDP и индивидуальные ICE-кривые",
-            "fig_ale", 460,
+            "fig_ale", 500,
             controls=(
                 "<|{num_feat_lbl}|selector|lov={NUM_LOV}|dropdown|label=Числовой признак (43)|on_change=on_global_ctl|>\n\n"
-                "<|{curve_period}|selector|lov={SAMPLE_LOV}|dropdown|label=Период|on_change=on_global_ctl|>"
+                "<|{curve_period}|selector|lov={SAMPLE_LOV}|dropdown|label=Период|on_change=on_global_ctl|>\n\n"
+                "<|{ale_y_mode}|selector|lov={ALE_Y_LOV}|dropdown|label=Ось вероятности (Y)|on_change=on_global_ctl|>"
             ),
-            n_ctl=2,
+            n_ctl=3,
         ),
         card(
             "Категориальное поле: group-PDP (what-if подстановка уровня целиком)",
@@ -484,7 +498,15 @@ cases_page = "\n\n".join([
 |>
 """,
     kp.markup("cases"),
-    card("Сверка топ-12 признаков кейса: вклад SHAP модели против фактической доли инцидентов (95 % ДИ Уилсона)", "fig_verify", 500),
+    card(
+        "Сверка топ-12 признаков кейса: вклад SHAP модели против фактической доли инцидентов (95 % ДИ Уилсона)",
+        "fig_verify", 520,
+        controls=(
+            "<|{verif_scale}|selector|lov={VERIF_SCALE_LOV}|dropdown|label=Масштаб оси долей|on_change=on_case_ctl|>\n\n"
+            "<|{verif_ci_mode}|selector|lov={VERIF_CI_LOV}|dropdown|label=Доверительные интервалы|on_change=on_case_ctl|>"
+        ),
+        n_ctl=2,
+    ),
     table_card("Детальная таблица верификации топ-12 признаков кейса", "tbl_verify", page_size=12),
 ])
 
