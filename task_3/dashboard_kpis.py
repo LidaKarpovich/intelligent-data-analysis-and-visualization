@@ -34,7 +34,7 @@ TILES = {
     ],
     "drift": [
         ("d_psi", "Полей с сильным дрейфом"),
-        ("d_shap", "Макс. сдвиг важности |SHAP|"),
+        ("d_shap", "Макс. сдвиг важности SHAP"),
         ("d_enr", "Обогащение «Вендор + Алерт»"),
         ("d_shift", "Сдвиг среднего скора"),
     ],
@@ -120,7 +120,7 @@ def page_card(store: dd.Store, eid: int, tau: float, slc: dict) -> dict:
 
 # ---------------------------------------------------------------- 2. Похожие карточки
 def page_similar(store: dd.Store, eid: int, space: str, tau: float) -> dict:
-    sp = "pca" if "PCA" in space or "SVD" in space else "shap"
+    sp = "pca" if ("SVD" in space or "Признаки" in space or space == "pca") else "shap"
     nbr = store.neighbors_team5[(store.neighbors_team5["target_id"] == eid) & (store.neighbors_team5["space"] == sp)]
     r = dd.card_row(store, eid)
     out_card = dd.outcome_of(int(r["y_true"]), float(r["proba_calc"]), tau)

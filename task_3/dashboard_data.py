@@ -366,7 +366,7 @@ def similar_group_shap(store: Store, eid: int, mode: str = "40 ближайши�
 
 
 def neighbors_table(store: Store, eid: int, space: str = "shap", tau: float = DEFAULT_TAU) -> pd.DataFrame:
-    sp = "pca" if "PCA" in space or "SVD" in space or space == "pca" else "shap"
+    sp = "pca" if ("SVD" in space or "Признаки" in space or space == "pca") else "shap"
     df = store.neighbors_team5[(store.neighbors_team5["target_id"] == eid) & (store.neighbors_team5["space"] == sp)].copy()
     if df.empty:
         return pd.DataFrame(columns=["№", "EntityId", "Сходство", "Выборка", "Факт", "Оценка", "Исход при τ", "Правило SIEM"])

@@ -38,7 +38,14 @@ OUTCOME_LOV = ["Все (8)", "FN", "FP", "TP", "TN"]
 PRESET_LOV = list(dd.PRESETS.keys())
 DETAIL_LOV = ["73 поля SOC", "1 099 фич модели"]
 SPACE_LOV = ["SHAP 73D (PCA)", "Признаки (SVD-20)", "SHAP (t-SNE)"]
-COLOR_LOV = ["Доля инцидентов (факт)", "Решение модели (приоритет)", "Доля ошибок модели", "Кластеры (MiniBatchKMeans)"]
+COLOR_LOV = [
+    "Доля инцидентов (факт)",
+    "Плотность карточек (классический Hexbin)",
+    "Решение модели (приоритет)",
+    "Доля ошибок модели",
+    "Кластер выбранной карточки",
+    "Топ-5 кластеров (дискретно)",
+]
 GROUP_LOV = ["40 ближайших по SHAP", "Тот же исход (практика 320)", "Весь срез практики (320)"]
 SAMPLE_LOV = ["Эксплуатация", "Приёмка"]
 DRIFT_SORT_LOV = ["По сдвигу |SHAP|", "По PSI", "По росту пропусков"]
@@ -308,11 +315,16 @@ def on_init(state):
 
 # ---------------------------------------------------------------- разметка страниц
 def card(title: str, fig: str, height: int, controls: str = "", n_ctl: int = 0) -> str:
-    cols = " ".join(["1"] + ["auto"] * n_ctl)
-    head = (
-        f"<|layout|columns={cols}|gap=12px|class_name=card-head|\n<|{title}|text|class_name=card-title|>\n\n{controls}\n|>"
-        if controls else f"<|{title}|text|class_name=card-title|>"
-    )
+    # Экранируем вертикальную черту, чтобы Taipy не обрезал заголовки
+    safe_title = title.replace("|", "∣")
+    if controls:
+        cols = " ".join(["1"] * max(n_ctl, 1))
+        head = (
+            f"<|{safe_title}|text|class_name=card-title|>\n"
+            f"<|layout|columns={cols}|gap=12px|class_name=card-controls|\n{controls}\n|>"
+        )
+    else:
+        head = f"<|{safe_title}|text|class_name=card-title|>"
     return (
         f"<|part|class_name=card|\n{head}\n"
         f"<|chart|figure={{{fig}}}|plot_config={{PLOT_CONFIG}}|height={height}px|>\n|>"
@@ -417,11 +429,11 @@ global_page = "\n\n".join([
             controls="<|{bw_sample}|selector|lov={SAMPLE_LOV}|dropdown|label=Выборка|on_change=on_global_ctl|>",
             n_ctl=1,
         ),
-        card("Глобальная важность по выборкам (mean|SHAP|) и проверка методом Ablation", "fig_global_dot", 500),
+        card("Глобальная важность по выборкам (средний модуль SHAP) и проверка Ablation", "fig_global_dot", 500),
     ),
     two(
         card(
-            "Числовой признак: ALE (основной при коллинеарности), PDP и индивидуальные ICE-кривые",
+            "Числовой признак: ALE, PDP и индивидуальные ICE-кривые",
             "fig_ale", 460,
             controls=(
                 "<|{num_feat_lbl}|selector|lov={NUM_LOV}|dropdown|label=Числовой признак (43)|on_change=on_global_ctl|>\n\n"
@@ -443,7 +455,7 @@ drift_page = "\n\n".join([
     kp.markup("drift"),
     two(
         card(
-            "Сдвиг глобальной важности mean|SHAP| (Приёмка → Эксплуатация) и индекс дрейфа PSI",
+            "Сдвиг глобальной важности SHAP (Приёмка → Эксплуатация) и индекс дрейфа PSI",
             "fig_drift_db", 500,
             controls="<|{drift_sort}|selector|lov={DRIFT_SORT_LOV}|dropdown|label=Сортировка|on_change=on_drift_ctl|>",
             n_ctl=1,

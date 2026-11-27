@@ -129,6 +129,8 @@ body, main {
   color: var(--ink);
   line-height: 1.3;
 }
+.card-controls { margin: 8px 0 6px; align-items: end; }
+.card-controls .taipy-selector, .card-controls .MuiFormControl-root { width: 100%; margin: 0; }
 .case-summary {
   display: block;
   margin-top: 10px;
