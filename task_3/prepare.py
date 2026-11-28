@@ -536,38 +536,12 @@ def hexbin_aggregate(
     parts: np.ndarray,
     gridsize: int = 34,
 ) -> pd.DataFrame:
-    """Точное гексагональное бинирование в чистом numpy (масштабируется на 40k–240k+ точек)."""
-    x = coords[:, 0].astype(np.float64)
-    yv = coords[:, 1].astype(np.float64)
-    xmin, xmax = float(x.min()), float(x.max())
-    ymin, ymax = float(yv.min()), float(yv.max())
-    dx = max(xmax - xmin, 1e-9)
-    dy = max(ymax - ymin, 1e-9)
-
-    u = (x - xmin) / dx * gridsize
-    v = (yv - ymin) / dy * gridsize
-
-    # Плоские сверху гексагоны (axial -> cube round)
-    qf = (2.0 / 3.0) * u
-    rf = (-1.0 / 3.0) * u + (np.sqrt(3.0) / 3.0) * v
-    sf = -qf - rf
-
-    rq, rr, rs = np.round(qf), np.round(rf), np.round(sf)
-    dq, dr, ds = np.abs(rq - qf), np.abs(rr - rf), np.abs(rs - sf)
-    m_q = (dq > dr) & (dq > ds)
-    m_r = (~m_q) & (dr > ds)
-    rq = np.where(m_q, -rr - rs, rq).astype(int)
-    rr = np.where(m_r, -rq - rs, rr).astype(int)
-
+    """Гексагональное бинирование с сохранением индексов (hq, hr) для динамического пересчёта τ."""
+    rq, rr, xmin, dx, ymin, dy = _hex_assign(coords, gridsize)
     df = pd.DataFrame({
-        "hq": rq,
-        "hr": rr,
-        "y": y,
-        "proba": proba,
-        "pred": (proba >= tau).astype(np.int8),
-        "cluster": clusters,
-        "rule": rules,
-        "is_oper": (parts == "Эксплуатация").astype(np.int8),
+        "hq": rq, "hr": rr, "y": y, "proba": proba,
+        "pred": (proba >= tau).astype(np.int8), "cluster": clusters,
+        "rule": rules, "is_oper": (parts == "Эксплуатация").astype(np.int8),
     })
 
     rows = []
@@ -578,44 +552,49 @@ def hexbin_aggregate(
         yc = ymin + (vc / gridsize) * dy
         lab = g[g["y"] >= 0]
         n_lab = len(lab)
-        inc_rate = float(lab["y"].mean()) if n_lab else np.nan
-        err_rate = float((lab["pred"] != lab["y"]).mean()) if n_lab else np.nan
-        fn_rate = float(((lab["y"] == 1) & (lab["pred"] == 0)).mean()) if n_lab else np.nan
-        dom_cl = int(g["cluster"].value_counts().index[0])
-        top_r = str(g["rule"].dropna().value_counts().index[0]) if g["rule"].notna().any() else "—"
         rows.append({
+            "hq": int(hq),
+            "hr": int(hr),
             "x": float(xc),
             "y": float(yc),
             "n": int(len(g)),
             "n_labeled": int(n_lab),
             "n_oper": int(g["is_oper"].sum()),
-            "inc_rate": inc_rate,
+            "inc_rate": float(lab["y"].mean()) if n_lab else np.nan,
             "pred_rate": float(g["pred"].mean()),
-            "err_rate": err_rate,
-            "fn_rate": fn_rate,
+            "err_rate": float((lab["pred"] != lab["y"]).mean()) if n_lab else np.nan,
+            "fn_rate": float(((lab["y"] == 1) & (lab["pred"] == 0)).mean()) if n_lab else np.nan,
             "mean_proba": float(g["proba"].mean()),
-            "dominant_cluster": dom_cl,
-            "top_rule": clean_display_value(top_r, 48),
+            "dominant_cluster": int(g["cluster"].value_counts().index[0]),
+            "top_rule": clean_display_value(
+                str(g["rule"].dropna().value_counts().index[0]) if g["rule"].notna().any() else "—", 48
+            ),
         })
     return pd.DataFrame(rows)
 
 
-def _hex_assign(coords: np.ndarray, gridsize: int) -> tuple[np.ndarray, np.ndarray]:
-    x, yv = coords[:, 0].astype(np.float64), coords[:, 1].astype(np.float64)
+def _hex_assign(coords: np.ndarray, gridsize: int) -> tuple[np.ndarray, np.ndarray, float, float, float, float]:
+    """Присваивает каждой точке плоский гексагон (hq, hr) и возвращает границы сетки."""
+    x = coords[:, 0].astype(np.float64)
+    yv = coords[:, 1].astype(np.float64)
     xmin, xmax = float(x.min()), float(x.max())
     ymin, ymax = float(yv.min()), float(yv.max())
-    u = (x - xmin) / max(xmax - xmin, 1e-9) * gridsize
-    v = (yv - ymin) / max(ymax - ymin, 1e-9) * gridsize
+    dx = max(xmax - xmin, 1e-9)
+    dy = max(ymax - ymin, 1e-9)
+
+    u = (x - xmin) / dx * gridsize
+    v = (yv - ymin) / dy * gridsize
     qf = (2.0 / 3.0) * u
     rf = (-1.0 / 3.0) * u + (np.sqrt(3.0) / 3.0) * v
     sf = -qf - rf
+
     rq, rr, rs = np.round(qf), np.round(rf), np.round(sf)
     dq, dr, ds = np.abs(rq - qf), np.abs(rr - rf), np.abs(rs - sf)
     m_q = (dq > dr) & (dq > ds)
     m_r = (~m_q) & (dr > ds)
     rq = np.where(m_q, -rr - rs, rq).astype(np.int32)
     rr = np.where(m_r, -rq - rs, rr).astype(np.int32)
-    return rq, rr
+    return rq, rr, xmin, dx, ymin, dy
 
 
 def build_similarity_maps(
@@ -687,21 +666,6 @@ def build_similarity_maps(
     else:
         hex_tsne = pd.DataFrame(columns=hex_shap.columns)
     
-    hq_sh, hr_sh = _hex_assign(xy_shap, 34)
-    hq_pc, hr_pc = _hex_assign(xy_pca, 34)
-    hq_ts = np.full(len(y_all), -10**9, dtype=np.int32)
-    hr_ts = np.full(len(y_all), -10**9, dtype=np.int32)
-    if run_tsne:
-        hq_ts[sub_idx], hr_ts[sub_idx] = _hex_assign(xy_tsne, 30)
-
-    points_tau_df = pd.DataFrame({
-        "hq_shap": hq_sh, "hr_shap": hr_sh,
-        "hq_pca": hq_pc, "hr_pca": hr_pc,
-        "hq_tsne": hq_ts, "hr_tsne": hr_ts,
-        "y": y_all.astype(np.int8),
-        "proba": p_all.astype(np.float32),
-    })
-
     # Профили кластеров (для подписей центроидов на карте)
     cl_rows = []
     for space, xy, cl in [("shap", xy_shap, cl_shap), ("pca", xy_pca, cl_pca)]:
@@ -777,6 +741,20 @@ def build_similarity_maps(
                 })
     neighbors_df = pd.DataFrame(nbr_rows)
 
+    hq_sh, hr_sh, *_ = _hex_assign(xy_shap, 34)
+    hq_pc, hr_pc, *_ = _hex_assign(xy_pca, 34)
+    hq_ts = np.full(len(y_all), -10**9, dtype=np.int32)
+    hr_ts = np.full(len(y_all), -10**9, dtype=np.int32)
+    if run_tsne:
+        hq_ts[sub_idx], hr_ts[sub_idx], *_ = _hex_assign(xy_tsne, 30)
+
+    points_tau_df = pd.DataFrame({
+        "hq_shap": hq_sh, "hr_shap": hr_sh,
+        "hq_pca": hq_pc, "hr_pca": hr_pc,
+        "hq_tsne": hq_ts, "hr_tsne": hr_ts,
+        "y": y_all.astype(np.int8),
+        "proba": p_all.astype(np.float32),
+    })
     tables = {
         "map_hex_shap": hex_shap,
         "map_hex_pca": hex_pca,
@@ -1134,6 +1112,25 @@ def main(raw_path: Path, course_dir: Path, team: int, xlsx_path: str | None, ski
     gpdp_t = compute_group_pdp_categorical(advisor, X_all[t_sub_idx[:800]], "Приёмка")
     gpdp_o = compute_group_pdp_categorical(advisor, X_all[o_sub_idx[:1000]], "Эксплуатация")
     curves_cat_df = pd.concat([gpdp_t, gpdp_o], ignore_index=True)
+    
+    # 6б. Полная матрица корреляций Спирмена (43×43) и выборка сырых значений для динамической гистограммы/KDE
+    num_oper_df = prepared_all.iloc[o_sub_idx][NUMERIC_FEATURES_43].apply(pd.to_numeric, errors="coerce")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res_c = spearmanr(num_oper_df.to_numpy(dtype=float), nan_policy="omit")
+        c_mat = np.nan_to_num(res_c.statistic, nan=0.0) if np.ndim(res_c.statistic) == 2 else np.eye(len(NUMERIC_FEATURES_43))
+    np.fill_diagonal(c_mat, 1.0)
+    corr_rows = []
+    for i, ci in enumerate(NUMERIC_FEATURES_43):
+        for j, cj in enumerate(NUMERIC_FEATURES_43):
+            corr_rows.append({"feat_a": ci, "feat_b": cj, "spearman": float(c_mat[i, j])})
+    corr_num_df = pd.DataFrame(corr_rows)
+
+    dist_t = prepared_all.iloc[t_sub_idx][NUMERIC_FEATURES_43].apply(pd.to_numeric, errors="coerce").astype(np.float32)
+    dist_t.insert(0, "period", "Приёмка")
+    dist_o = num_oper_df.astype(np.float32).copy()
+    dist_o.insert(0, "period", "Эксплуатация")
+    numeric_dist_df = pd.concat([dist_t, dist_o], ignore_index=True)
 
     # 7. Дрейф «Приёмка -> Эксплуатация» (PSI, пропуски, ΔSHAP, бины распределений)
     print("Считаю дрейф признаков Приёмка -> Эксплуатация...")
@@ -1214,6 +1211,8 @@ def main(raw_path: Path, course_dir: Path, team: int, xlsx_path: str | None, ski
     drift_summary_df.to_parquet(AGG_DIR / "drift_summary.parquet", index=False)
     drift_bins_df.to_parquet(AGG_DIR / "drift_bins.parquet", index=False)
     verif_df.to_parquet(AGG_DIR / "verification_team5.parquet", index=False)
+    corr_num_df.to_parquet(AGG_DIR / "corr_numeric.parquet", index=False)
+    numeric_dist_df.to_parquet(AGG_DIR / "numeric_dist_sample.parquet", index=False)
     for name, df in map_tables.items():
         df.to_parquet(AGG_DIR / f"{name}.parquet", index=False)
 

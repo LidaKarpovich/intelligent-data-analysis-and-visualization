@@ -10,6 +10,9 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from scipy.cluster.hierarchy import leaves_list, linkage
+from scipy.spatial.distance import squareform
+from scipy.stats import gaussian_kde
 
 import dashboard_data as dd
 from feature_registry import FEATURE_ORDER_73, REGISTRY
@@ -58,6 +61,8 @@ WHY = {
                   "гантели долей для категорий с выделенной строкой пропусков) объясняет причину дрейфа вкладов.",
     "verify_wilson": "Двухпанельное сопоставление SHAP-вкладов кейса с фактической долей реальных инцидентов "
                      "и 95 %-ным интервалом Уилсона переводит XAI из гипотезы в статистически проверяемый факт.",
+    "corr_heatmap": "Кластеризованная тепловая карта корреляций Спирмена (только поля со связью |ρ| ≥ 0,5) "
+                    "группирует мультиколлинеарные признаки в видимые блоки, сразу объясняя, для каких полей PDP искажается.",
 }
 
 WHY_ALT = {
@@ -72,6 +77,7 @@ WHY_ALT = {
     "drift_dumbbell": "сгруппированные столбцы: хуже читается величина и знак сдвига, удваивается визуальная нагрузка",
     "drift_dist": "одно число PSI без профиля: показывает масштаб сдвига, но не объясняет, какие именно уровни или пропуски выросли",
     "verify_wilson": "один Waterfall без статистики данных: показывает логику модели, но не отвечает, подтверждается ли она реальностью",
+    "corr_heatmap": "матрица всех 43×43 полей без сортировки: превращается в нечитаемую сетку из ~1 800 ячеек с преобладанием нулей",
 }
 
 
@@ -635,6 +641,24 @@ def fig_global_dot(store: dd.Store, top_k: int = 15) -> go.Figure:
     )
 
 
+def _trim_outlier_tails(arr: np.ndarray, lo_q: float = 0.02, hi_q: float = 0.95) -> tuple[np.ndarray, int, int, float, float]:
+    """Обрезает экстремальные выбросы слева и справа, если они растягивают ось более чем на 50% ядра."""
+    v = arr[np.isfinite(arr)]
+    if len(v) < 20 or len(np.unique(v)) <= 10:
+        return v, 0, 0, float(v.min()) if len(v) else 0.0, float(v.max()) if len(v) else 1.0
+    vmin, vmax = float(v.min()), float(v.max())
+    qlo, qhi = float(np.quantile(v, lo_q)), float(np.quantile(v, hi_q))
+    span_core = max(qhi - qlo, 1e-9)
+    hi_cut = qhi if (vmax - qhi) > 0.5 * span_core else vmax
+    lo_cut = qlo if (qlo - vmin) > 0.5 * span_core else vmin
+    left_n = int((v < lo_cut).sum())
+    right_n = int((v > hi_cut).sum())
+    core = v[(v >= lo_cut) & (v <= hi_cut)]
+    if len(core) < 10 or float(np.std(core)) < 1e-12:
+        return v, 0, 0, vmin, vmax
+    return core, left_n, right_n, lo_cut, hi_cut
+
+
 def fig_ale_pdp_ice(
     store: dd.Store,
     source_col: str,
@@ -642,8 +666,10 @@ def fig_ale_pdp_ice(
     eid: int,
     show_ice: bool = True,
     y_mode: str = "Автофокус (ALE/PDP)",
+    dist_mode: str = "Гистограмма (равные бины)",
+    kde_bw: float = 1.0,
 ) -> go.Figure:
-    """ALE + PDP + ICE с автообрезкой экстремального правого хвоста, контрастной гистограммой и фокусом по Y."""
+    """ALE + PDP + ICE + нижняя панель распределения (равные бины гистограммы или динамический KDE)."""
     cn = store.curves_num[(store.curves_num["source_column"] == source_col) & (store.curves_num["period"] == period)].sort_values("grid_idx").reset_index(drop=True)
     if cn.empty:
         return empty(f"Для «{source_col}» недостаточно данных для ALE/PDP")
@@ -654,42 +680,35 @@ def fig_ale_pdp_ice(
     max_r = float(cn["max_spearman"].iloc[0])
     is_discrete = bool(cn["is_discrete"].iloc[0])
 
-    # 1. Автообрезка экстремального правого хвоста (чтобы одиночный выброс вроде 41M не сжимал график в точку)
-    tail_n, tail_max, tail_q = 0, float(cn["raw_value"].iloc[-1]), 1.0
-    cn_vis = cn.copy()
-    if not is_discrete and len(cn_vis) >= 5:
-        while len(cn_vis) >= 5:
-            xv = cn_vis["raw_value"].to_numpy(dtype=float)
-            span = max(xv[-1] - xv[0], 1e-12)
-            # Если последний интервал занимает > 35 % всей ширины оси — выносим его в явную подпись хвоста
-            if (xv[-1] - xv[-2]) > 0.35 * span and float(cn_vis["quantile"].iloc[-2]) >= 0.80:
-                tail_n += int(cn_vis["bin_n"].iloc[-2])
-                cn_vis = cn_vis.iloc[:-1].reset_index(drop=True)
-            else:
-                break
-        tail_q = float(cn_vis["quantile"].iloc[-1])
+    # Берём сырые значения выборки (если есть numeric_dist_sample.parquet) для честного диапазона и KDE
+    raw_sample = np.array([], dtype=float)
+    if store.numeric_dist is not None and source_col in store.numeric_dist.columns:
+        sub_d = store.numeric_dist[store.numeric_dist["period"] == period]
+        raw_sample = pd.to_numeric(sub_d[source_col], errors="coerce").dropna().to_numpy(dtype=float)
+
+    left_n, right_n = 0, 0
+    if len(raw_sample) >= 20 and not is_discrete:
+        core_vals, left_n, right_n, x_lo, x_hi = _trim_outlier_tails(raw_sample)
+        cn_vis = cn[(cn["raw_value"] >= x_lo - 1e-9) & (cn["raw_value"] <= x_hi + 1e-9)].reset_index(drop=True)
+        if len(cn_vis) < 2:
+            cn_vis = cn.copy()
+            core_vals = raw_sample
+            x_lo, x_hi, left_n, right_n = float(cn["raw_value"].min()), float(cn["raw_value"].max()), 0, 0
+    else:
+        cn_vis = cn.copy()
+        core_vals = raw_sample
+        x_lo, x_hi = float(cn_vis["raw_value"].min()), float(cn_vis["raw_value"].max())
 
     raw_vis = cn_vis["raw_value"].to_numpy(dtype=float)
-    use_log = (
-        not is_discrete
-        and len(raw_vis) >= 4
-        and raw_vis.min() >= 0.0
-        and raw_vis.max() > 25.0 * max(float(np.median(raw_vis)), 1.0)
-    )
-    tx = (lambda arr: np.log10(np.maximum(arr, 0.0) + 1.0)) if use_log else (lambda arr: np.asarray(arr, dtype=float))
-    x_plot = tx(raw_vis)
     vis_gids = set(cn_vis["grid_idx"].astype(int).tolist())
-
     pdp_base = float(cn["pdp"].mean())
     ale_shifted = cn_vis["ale"].to_numpy(dtype=float) + pdp_base
     pdp_vis = cn_vis["pdp"].to_numpy(dtype=float)
 
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.72, 0.28], vertical_spacing=0.06)
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.68, 0.32], vertical_spacing=0.07)
 
-    # 2. ICE: мягкая полоса IQR (25–75 %) + 15 контрастных кривых (без сливания с сеткой)
-    ice_focus_hi = 0.0
-    n_clipped_ice = 0
-    t5_max = 0.0
+    # --- Верхняя панель: ICE + PDP + ALE ---
+    ice_focus_hi, n_clipped_ice, t5_max = 0.0, 0, 0.0
     bg_max_per_curve = np.array([])
     if show_ice and period == "Эксплуатация":
         ice = store.curves_ice[(store.curves_ice["source_column"] == source_col) & (store.curves_ice["grid_idx"].isin(vis_gids))]
@@ -698,63 +717,55 @@ def fig_ale_pdp_ice(
             piv = bg.pivot(index="curve_id", columns="grid_idx", values="proba").reindex(columns=cn_vis["grid_idx"].tolist())
             mat = piv.to_numpy(dtype=float)
             if mat.size:
-                q25 = np.nanpercentile(mat, 25, axis=0)
-                q75 = np.nanpercentile(mat, 75, axis=0)
+                q25, q75 = np.nanpercentile(mat, 25, axis=0), np.nanpercentile(mat, 75, axis=0)
                 ice_focus_hi = float(np.nanmax(q75))
                 bg_max_per_curve = np.nanmax(mat, axis=1)
-
-                # Полупрозрачная полоса 25–75 % ICE
                 fig.add_trace(go.Scatter(
-                    x=np.concatenate([x_plot, x_plot[::-1]]),
+                    x=np.concatenate([raw_vis, raw_vis[::-1]]),
                     y=np.concatenate([q75, q25[::-1]]),
                     fill="toself", fillcolor=_rgba(BLUE, 0.11), line=dict(width=0),
-                    name="ICE (25–75 % карточек)", hoverinfo="skip",
+                    name="ICE (25–75 %)", hoverinfo="skip",
                 ), row=1, col=1)
-
-                # 15 отдельных ICE-кривых контрастного серо-синего оттенка
                 ix, iy = [], []
                 for row_i in range(min(15, len(mat))):
-                    ix += x_plot.tolist() + [None]
+                    ix += raw_vis.tolist() + [None]
                     iy += mat[row_i].tolist() + [None]
                 fig.add_trace(go.Scatter(
-                    x=ix, y=iy, mode="lines", name="ICE (примеры карточек)",
+                    x=ix, y=iy, mode="lines", name="ICE (примеры)",
                     line=dict(color="rgba(71, 84, 103, 0.34)", width=1.1), hoverinfo="skip",
                 ), row=1, col=1)
 
         t5 = ice[(ice["curve_kind"] == "team5") & (ice["curve_id"] == str(eid))].sort_values("grid_idx")
         if len(t5):
-            t5_x = tx(t5["raw_value"].to_numpy(dtype=float))
+            t5_x = t5["raw_value"].to_numpy(dtype=float)
             t5_y = t5["proba"].to_numpy(dtype=float)
             t5_max = float(np.nanmax(t5_y))
             fig.add_trace(go.Scatter(
-                x=t5_x, y=t5_y, mode="lines+markers", name=f"ICE карточки {eid}",
+                x=t5_x, y=t5_y, mode="lines+markers", name=f"ICE {eid}",
                 line=dict(color=MISS, width=2.2, dash="dot"), marker=dict(size=5, color=MISS),
-                customdata=t5["raw_value"],
-                hovertemplate=f"Карточка {eid}: при значении %{{customdata:.4g}} → p=%{{y:.2%}}<extra></extra>",
+                hovertemplate=f"Карточка {eid}: при %{{x:.4g}} → p=%{{y:.2%}}<extra></extra>",
             ), row=1, col=1)
             cv = float(t5["card_raw_value"].iloc[0])
-            if np.isfinite(cv) and cv <= raw_vis.max() * 1.01:
-                fig.add_vline(x=float(tx(np.array([cv]))[0]), line=dict(color=MISS, width=1.3, dash="dot"),
+            if np.isfinite(cv) and x_lo <= cv <= x_hi:
+                fig.add_vline(x=cv, line=dict(color=MISS, width=1.3, dash="dot"),
                               annotation_text=f"факт {eid}: {_fmt_compact(cv)}", annotation_position="top right",
-                              annotation_font=dict(size=10, color=MISS), row=1, col=1)
+                              annotation_font=dict(size=10, color=MISS), row=1, col=1, exclude_empty_subplots=False)
 
-    # PDP и ALE
     fig.add_trace(go.Scatter(
-        x=x_plot, y=pdp_vis, mode="lines+markers",
+        x=raw_vis, y=pdp_vis, mode="lines+markers",
         name="PDP (искажён при |ρ|≥0,7)" if warn else "PDP (среднее)",
         line=dict(color=INK_2 if warn else BLUE, width=1.8, dash="dash" if warn else "solid"),
-        marker=dict(size=5), customdata=raw_vis,
-        hovertemplate="PDP при %{customdata:.4g}: средняя оценка %{y:.2%}<extra></extra>",
+        marker=dict(size=5),
+        hovertemplate="PDP при %{x:.4g}: средняя оценка %{y:.2%}<extra></extra>",
     ), row=1, col=1)
 
     fig.add_trace(go.Scatter(
-        x=x_plot, y=ale_shifted, mode="lines+markers", name="ALE (основной)",
+        x=raw_vis, y=ale_shifted, mode="lines+markers", name="ALE (основной)",
         line=dict(color=ORANGE, width=3), marker=dict(size=7, color=ORANGE, line=dict(color=SURFACE, width=1.5)),
-        customdata=np.c_[raw_vis, cn_vis["ale"]],
-        hovertemplate="ALE при %{customdata[0]:.4g}: эффект %{customdata[1]:+.2%} (уровень %{y:.2%})<extra></extra>",
+        customdata=cn_vis["ale"],
+        hovertemplate="ALE при %{x:.4g}: эффект %{customdata:+.2%} (уровень %{y:.2%})<extra></extra>",
     ), row=1, col=1)
 
-    # 3. Умный масштаб Y (чтобы ALE/PDP не прижимались к дну из-за 2–3 выбросных ICE)
     if y_mode.startswith("Автофокус"):
         focus_top = max(float(ale_shifted.max()), float(pdp_vis.max()), t5_max, ice_focus_hi)
         y_hi = min(1.03, max(focus_top * 1.30 + 0.02, 0.08))
@@ -764,67 +775,122 @@ def fig_ale_pdp_ice(
     else:
         y_lo, y_hi = -0.02, 1.04
 
-    # Компактные информационные бейджи без перекрытия кривых
     notes = []
     if warn:
-        notes.append(f"⚠ |ρ|={dd.fmt_num(max_r, 2)} с «{_short(partner, 20)}» — смотрите ALE")
+        p_ru = REGISTRY[partner].label_ru if partner in REGISTRY else partner
+        notes.append(f"⚠ |ρ|={dd.fmt_num(max_r, 2)} с «{_short(p_ru, 22)}» — смотрите ALE")
     if n_clipped_ice > 0:
         notes.append(f"фокус Y до {y_hi:.0%} ({n_clipped_ice} ICE выше)")
     if notes:
         fig.add_annotation(
             x=0.01, y=0.99, xref="x domain", yref="y domain", xanchor="left", yanchor="top", showarrow=False,
-            text=" · ".join(notes),
-            font=dict(size=10, color=MISS if warn else MUTED),
+            text=" · ".join(notes), font=dict(size=10, color=MISS if warn else MUTED),
             bgcolor="rgba(254,244,243,0.92)" if warn else "rgba(255,255,255,0.88)",
             bordercolor=MISS if warn else GRAY_LIGHT, borderwidth=1, borderpad=3,
         )
 
-    # 4. Контрастная нижняя гистограмма по реальным интервалам (никогда не сливается и не сжимается в нить)
-    if is_discrete or len(x_plot) < 2:
-        step = float(np.min(np.diff(x_plot))) if len(x_plot) >= 2 else 1.0
-        bar_x, bar_y, bar_w = x_plot, cn_vis["bin_n"].to_numpy(dtype=int), np.full(len(x_plot), max(step * 0.55, 0.25))
-        bar_hover = [f"Значение {_fmt_compact(rv)}: {dd.fmt_int(cnt)} карт." for rv, cnt in zip(raw_vis, bar_y)]
+    # --- Нижняя панель: честная гистограмма (равные бины) ИЛИ динамический KDE ---
+    dist_y_title = "Карточек"
+    use_kde = dist_mode.startswith("KDE") and not is_discrete and len(core_vals) >= 20 and len(np.unique(core_vals)) > 10
+    if len(core_vals) >= 10:
+        if use_kde:
+            bw = float(np.clip(kde_bw, 0.2, 2.5))
+            kde = gaussian_kde(core_vals, bw_method=lambda s, b=bw: max(s.scotts_factor() * b, 1e-3))
+            xg = np.linspace(x_lo, x_hi, 220)
+            yg = kde(xg)
+            fig.add_trace(go.Scatter(
+                x=xg, y=yg, mode="lines", fill="tozeroy",
+                fillcolor=_rgba(BLUE, 0.25), line=dict(color=BLUE, width=2),
+                showlegend=False,
+                hovertemplate="Значение %{x:.4g}<br>Плотность KDE: %{y:.4g}<extra></extra>",
+            ), row=2, col=1)
+            dist_y_title = f"Плотность (bw={dd.fmt_num(bw, 1)})"
+        elif is_discrete or len(np.unique(core_vals)) <= 12:
+            uv, cnt = np.unique(core_vals, return_counts=True)
+            step = float(np.min(np.diff(uv))) if len(uv) >= 2 else 1.0
+            fig.add_trace(go.Bar(
+                x=uv, y=cnt, width=max(step * 0.5, 0.25), showlegend=False,
+                marker=dict(color="#5c8ec9", opacity=0.88, line=dict(color=BLUE, width=0.6)),
+                hovertemplate="Значение %{x:.4g}: %{y:,} карт.<extra></extra>",
+            ), row=2, col=1)
+            if dist_mode.startswith("KDE"):
+                fig.add_annotation(
+                    x=0.99, y=0.95, xref="x2 domain", yref="y2 domain", xanchor="right", yanchor="top", showarrow=False,
+                    text="Дискретный признак: показаны точные частоты вместо KDE",
+                    font=dict(size=10, color=MUTED), bgcolor="rgba(255,255,255,0.88)",
+                )
+        else:
+            cnt, edges = np.histogram(core_vals, bins=32, range=(x_lo, x_hi))
+            centers = 0.5 * (edges[:-1] + edges[1:])
+            width = (edges[1] - edges[0]) * 0.88
+            hovers = [f"Интервал [{_fmt_compact(edges[i])}; {_fmt_compact(edges[i + 1])}]: {dd.fmt_int(cnt[i])} карт." for i in range(len(cnt))]
+            fig.add_trace(go.Bar(
+                x=centers, y=cnt, width=width, showlegend=False,
+                marker=dict(color="#5c8ec9", opacity=0.88, line=dict(color=BLUE, width=0.5)),
+                hovertext=hovers, hoverinfo="text",
+            ), row=2, col=1)
     else:
-        bar_x = 0.5 * (x_plot[:-1] + x_plot[1:])
-        bar_w = np.maximum((x_plot[1:] - x_plot[:-1]) * 0.86, (x_plot[-1] - x_plot[0]) * 0.025)
-        bar_y = cn_vis["bin_n"].to_numpy(dtype=int)[:-1]
-        bar_hover = [
-            f"Интервал [{_fmt_compact(raw_vis[i])}; {_fmt_compact(raw_vis[i + 1])}]: {dd.fmt_int(bar_y[i])} карт."
-            for i in range(len(bar_y))
-        ]
+        # Запасной вариант, если numeric_dist_sample.parquet ещё не сгенерирован
+        fig.add_trace(go.Bar(x=raw_vis, y=cn_vis["bin_n"], showlegend=False, marker=dict(color="#5c8ec9")), row=2, col=1)
 
-    fig.add_trace(go.Bar(
-        x=bar_x, y=bar_y, width=bar_w, showlegend=False,
-        marker=dict(color="#5c8ec9", opacity=0.85, line=dict(color="#2a78d6", width=0.6)),
-        hovertext=bar_hover, hoverinfo="text",
-    ), row=2, col=1)
-
-    if tail_n > 0:
+    # Явные подписи скрытых выбросов-хвостов
+    tail_parts = []
+    if left_n > 0:
+        tail_parts.append(f"← левый хвост < {_fmt_compact(x_lo)}: {dd.fmt_int(left_n)} карт.")
+    if right_n > 0:
+        tail_parts.append(f"правый хвост > {_fmt_compact(x_hi)}: {dd.fmt_int(right_n)} карт. →")
+    if tail_parts:
         fig.add_annotation(
-            x=0.99, y=0.96, xref="x2 domain", yref="y2 domain", xanchor="right", yanchor="top", showarrow=False,
-            text=f"→ хвост > {tail_q:.0%}-го перц. (до {_fmt_compact(tail_max)}, {dd.fmt_int(tail_n)} карт.) скрыт",
-            font=dict(size=10, color=INK_2), bgcolor="rgba(243,242,238,0.92)",
-            bordercolor=AXIS, borderwidth=1, borderpad=3,
+            x=0.99, y=0.95, xref="x2 domain", yref="y2 domain", xanchor="right", yanchor="top", showarrow=False,
+            text=" · ".join(tail_parts), font=dict(size=10, color=INK_2),
+            bgcolor="rgba(243,242,238,0.92)", bordercolor=AXIS, borderwidth=1, borderpad=3,
         )
 
-    # Убираем горизонтальную сетку с верхней панели, чтобы ICE-кривые не сливались с сеткой
     fig.update_yaxes(title_text="Оценка вероятности", range=[y_lo, y_hi], tickformat=".0%",
                      showgrid=False, showline=True, linecolor=AXIS, row=1, col=1)
-    fig.update_yaxes(title_text="Карточек", tickformat=",d", nticks=3,
-                     showgrid=True, gridcolor=GRID, row=2, col=1)
+    fig.update_yaxes(title_text=dist_y_title, nticks=3, showgrid=True, gridcolor=GRID, row=2, col=1)
+    fig.update_xaxes(title_text=f"{meta.label_ru} ({meta.source_column})", range=[x_lo - (x_hi - x_lo) * 0.02, x_hi + (x_hi - x_lo) * 0.02], row=2, col=1)
+    return base(fig, 500, legend=True, legend_y=1.05, margin=dict(l=8, r=16, t=54, b=14))
 
-    x_title = f"{meta.label_ru} ({meta.source_column})"
-    if use_log:
-        x_title += " · лог-шкала"
-        p_max = int(np.ceil(x_plot.max()))
-        raw_ticks = [0] + [10 ** k for k in range(0, p_max + 1)]
-        raw_ticks = [v for v in raw_ticks if np.log10(v + 1.0) <= x_plot.max() + 0.05]
-        fig.update_xaxes(tickvals=[np.log10(v + 1.0) for v in raw_ticks],
-                         ticktext=[_fmt_compact(v) for v in raw_ticks], row=2, col=1)
-    if tail_n > 0:
-        x_title += f" (показано до {tail_q:.0%}-го перц.)"
-    fig.update_xaxes(title_text=x_title, row=2, col=1)
-    return base(fig, 480, legend=True, legend_y=1.05, margin=dict(l=8, r=16, t=54, b=12))
+
+def fig_corr_heatmap(store: dd.Store, min_abs_corr: float = 0.50) -> go.Figure:
+    """Кластеризованная тепловая карта корреляций Спирмена (только признаки со связью |ρ| ≥ min_abs_corr)."""
+    if store.corr_numeric is None or store.corr_numeric.empty:
+        return empty("Перезапустите prepare.py для расчёта полной матрицы корреляций (corr_numeric.parquet)")
+
+    piv = store.corr_numeric.pivot(index="feat_a", columns="feat_b", values="spearman").fillna(0.0)
+    cols = list(piv.columns)
+    mat = piv.to_numpy(dtype=float).copy()
+    np.fill_diagonal(mat, 0.0)
+    keep = np.flatnonzero(np.max(np.abs(mat), axis=1) >= min_abs_corr)
+    if len(keep) < 2:
+        return empty(f"Нет пар числовых признаков с |ρ| ≥ {dd.fmt_num(min_abs_corr, 2)}")
+
+    sub_cols = [cols[i] for i in keep]
+    sub_mat = piv.loc[sub_cols, sub_cols].to_numpy(dtype=float)
+
+    # Иерархическая сортировка, чтобы коррелированные группы образовали яркие блоки у диагонали
+    if len(sub_cols) >= 3:
+        dist = np.clip(1.0 - np.abs(sub_mat), 0.0, 1.0)
+        np.fill_diagonal(dist, 0.0)
+        order = leaves_list(linkage(squareform(dist), method="average"))
+        sub_cols = [sub_cols[i] for i in order]
+        sub_mat = sub_mat[np.ix_(order, order)]
+
+    labels = [_short(REGISTRY[c].label_ru if c in REGISTRY else c, 28) for c in sub_cols]
+    text = [[f"{v:+.2f}" if (i != j and abs(v) >= min_abs_corr) else "" for j, v in enumerate(row)] for i, row in enumerate(sub_mat)]
+
+    fig = go.Figure(go.Heatmap(
+        z=sub_mat, x=labels, y=labels, text=text, texttemplate="%{text}",
+        textfont=dict(size=9, color=INK),
+        colorscale=[[0.0, BLUE], [0.5, "#f7f7f7"], [1.0, ORANGE]], zmin=-1.0, zmax=1.0,
+        colorbar=dict(title="Спирмен ρ", thickness=12, len=0.8),
+        hovertemplate="<b>%{y}</b> ↔ <b>%{x}</b><br>Спирмен ρ = %{z:+.2f}<extra></extra>",
+    ))
+    fig.update_xaxes(tickangle=-35, tickfont=dict(size=10, color=INK_2), side="bottom")
+    fig.update_yaxes(autorange="reversed", tickfont=dict(size=10, color=INK_2), showgrid=False)
+    h = max(420, min(680, 160 + 24 * len(sub_cols)))
+    return base(fig, h, margin=dict(l=8, r=16, t=16, b=100))
 
 
 def fig_cat_gpdp(store: dd.Store, cat_col: str) -> go.Figure:
@@ -866,22 +932,30 @@ def fig_cat_gpdp(store: dd.Store, cat_col: str) -> go.Figure:
 
 
 # ================================================================ 4. ДРЕЙФ ПРИЁМКА -> ЭКСПЛУАТАЦИЯ
-def fig_drift_dumbbell(store: dd.Store, sort_by: str = "По сдвигу |SHAP|", top_k: int = 15) -> go.Figure:
-    """Гантели сдвига mean|SHAP| между приёмкой и эксплуатацией + метка PSI (без наложения на ось Y)."""
-    ds = store.drift_summary.copy()
-    if sort_by == "По PSI":
-        ds = ds.sort_values("psi", ascending=False)
-    elif sort_by == "По росту пропусков":
-        ds = ds.sort_values("delta_null", ascending=False)
-    else:
-        ds["abs_d"] = ds["delta_abs_shap"].abs()
-        ds = ds.sort_values("abs_d", ascending=False)
+def fig_drift_dumbbell(
+    store: dd.Store,
+    sort_by: str = "По сдвигу |SHAP|",
+    only_high_psi: bool = True,
+    page_idx: int = 0,
+    page_size: int = dd.DRIFT_PAGE_SIZE,
+) -> go.Figure:
+    """Гантели сдвига mean|SHAP| с пагинацией и общим масштабом оси X по всему отфильтрованному списку."""
+    ds = dd.drift_filtered(store, sort_by, only_high_psi)
+    if ds.empty:
+        return empty("Нет полей, подходящих под выбранный фильтр дрейфа")
 
-    top = ds.head(top_k).iloc[::-1]
+    # Единый максимум оси X по всем страницам, чтобы длины гантелей были сравнимы при перелистывании
+    xmax = float(max(ds["mean_abs_shap_val"].max(), ds["mean_abs_shap_oper"].max())) * 1.28 + 1e-4
+
+    start = page_idx * page_size
+    page_df = ds.iloc[start:start + page_size]
+    if page_df.empty:
+        page_df = ds.iloc[:page_size]
+
+    top = page_df.iloc[::-1]
     names = [_short(r.label_ru, 34) for r in top.itertuples(index=False)]
     v_arr = top["mean_abs_shap_val"].to_numpy(dtype=float)
     o_arr = top["mean_abs_shap_oper"].to_numpy(dtype=float)
-    xmax = float(max(v_arr.max(), o_arr.max())) * 1.28 + 1e-4
 
     fig = go.Figure()
     for nm, a, b in zip(names, v_arr, o_arr):
@@ -899,7 +973,6 @@ def fig_drift_dumbbell(store: dd.Store, sort_by: str = "По сдвигу |SHAP|
         customdata=np.c_[top["psi"], top["null_val"], top["null_oper"]],
         hovertemplate="%{y}<br>эксплуатация mean|SHAP|: %{x:.3f}<br>PSI: %{customdata[0]:.2f} · пропуски: %{customdata[1]:.0%} → %{customdata[2]:.0%}<extra></extra>",
     ))
-    # Подписи PSI всегда справа от гантели — никогда не залезают на подписи оси Y
     fig.add_trace(go.Scatter(
         x=np.maximum(v_arr, o_arr) + xmax * 0.015, y=names, mode="text", showlegend=False,
         text=[f"PSI {dd.fmt_num(p, 2)}" for p in top["psi"]],
@@ -911,7 +984,7 @@ def fig_drift_dumbbell(store: dd.Store, sort_by: str = "По сдвигу |SHAP|
     fig.update_xaxes(title_text="Средний абсолютный вклад mean|SHAP| (log-odds)",
                      range=[-xmax * 0.02, xmax], showgrid=True, gridcolor=GRID)
     fig.update_yaxes(showgrid=False, tickfont=dict(size=11, color=INK_2))
-    return base(fig, 480, legend=True, margin=dict(l=8, r=68, t=42, b=10))
+    return base(fig, 440, legend=True, legend_y=1.04, margin=dict(l=8, r=70, t=42, b=36))
 
 
 def fig_drift_dist(store: dd.Store, source_col: str) -> go.Figure:

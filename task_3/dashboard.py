@@ -84,6 +84,7 @@ case_sel = CASE_LOV[1]                                # сомнительный
 verif_period = VERIF_PER_LOV[0]
 case_summary_text = ""
 
+# Состояние по умолчанию
 
 ALE_Y_LOV = ["Автофокус (ALE/PDP)", "Полная шкала (0–100 %)"]
 VERIF_SCALE_LOV = ["Автофокус по ДИ", "Полная шкала (0–100 %)"]
@@ -92,6 +93,17 @@ VERIF_CI_LOV = ["С 95 % ДИ Уилсона", "Без усов (только т
 ale_y_mode = ALE_Y_LOV[0]
 verif_scale = VERIF_SCALE_LOV[0]
 verif_ci_mode = VERIF_CI_LOV[0]
+
+
+DIST_MODE_LOV = ["Гистограмма (равные бины)", "KDE (сглаженная плотность)"]
+DRIFT_FILTER_LOV = ["Сильный дрейф (PSI ≥ 0,25)", "Все 73 поля"]
+
+ale_dist_mode = DIST_MODE_LOV[0]
+kde_bw = 1.0
+
+drift_filter = DRIFT_FILTER_LOV[0]
+DRIFT_PAGE_LOV = dd.drift_page_options(len(dd.drift_filtered(STORE, drift_sort, True)))
+drift_page = DRIFT_PAGE_LOV[0]
 
 
 # ---------------------------------------------------------------- расчёт представлений
@@ -138,8 +150,10 @@ def view_similar(store: dd.Store, eid: int, space: str, color: str, grp_mode: st
     )
 
 
-def view_global(store: dd.Store, sample: str, n_lbl: str, c_per: str, c_lbl: str, eid: int,
-                y_mode: str = ALE_Y_LOV[0]) -> dict:
+def view_global(
+    store: dd.Store, sample: str, n_lbl: str, c_per: str, c_lbl: str, eid: int,
+    y_mode: str = ALE_Y_LOV[0], dist_mode: str = DIST_MODE_LOV[0], bw: float = 1.0,
+) -> dict:
     nf = NUM_LABEL_TO_COL[n_lbl]
     cf = CAT_LABEL_TO_COL[c_lbl]
     return (
@@ -147,18 +161,22 @@ def view_global(store: dd.Store, sample: str, n_lbl: str, c_per: str, c_lbl: str
         | dict(
             fig_beeswarm=ch.fig_beeswarm(store, sample),
             fig_global_dot=ch.fig_global_dot(store),
-            fig_ale=ch.fig_ale_pdp_ice(store, nf, c_per, eid, show_ice=True, y_mode=y_mode),
+            fig_ale=ch.fig_ale_pdp_ice(store, nf, c_per, eid, show_ice=True, y_mode=y_mode,
+                                       dist_mode=dist_mode, kde_bw=float(bw)),
             fig_gpdp=ch.fig_cat_gpdp(store, cf),
+            fig_corr_hm=ch.fig_corr_heatmap(store, min_abs_corr=0.50),
         )
     )
 
 
-def view_drift(store: dd.Store, sort_by: str, f_lbl: str) -> dict:
+def view_drift(store: dd.Store, sort_by: str, f_lbl: str, flt_lbl: str, page_lbl: str) -> dict:
     col = ALL_LABEL_TO_COL[f_lbl]
+    only_high = flt_lbl.startswith("Сильный")
+    p_idx = dd.parse_page_idx(page_lbl)
     return (
         kp.page_drift(store)
         | dict(
-            fig_drift_db=ch.fig_drift_dumbbell(store, sort_by),
+            fig_drift_db=ch.fig_drift_dumbbell(store, sort_by, only_high_psi=only_high, page_idx=p_idx),
             fig_drift_dist=ch.fig_drift_dist(store, col),
         )
     )
@@ -181,8 +199,11 @@ def view_cases(store: dd.Store, case_name: str, period: str, tau: float,
 
 def compute_all(
     store: dd.Store, eid: int, tau: float, n_top: int, detail: str,
-    space: str, color: str, grp_mode: str, sample: str, n_lbl: str, c_per: str, c_lbl: str,
-    d_sort: str, d_feat: str, c_name: str, v_per: str,
+    space: str, color: str, grp_mode: str,
+    sample: str, n_lbl: str, c_per: str, c_lbl: str,
+    y_mode: str, dist_mode: str, bw: float,
+    d_sort: str, d_feat: str, d_flt: str, d_page: str,
+    c_name: str, v_per: str, v_scale: str, v_ci: str,
 ) -> dict:
     out = dict(
         period_caption=header_caption(store, tau),
@@ -190,17 +211,20 @@ def compute_all(
     )
     out |= view_card(store, eid, tau, n_top, detail)
     out |= view_similar(store, eid, space, color, grp_mode, tau)
-    out |= view_global(store, sample, n_lbl, c_per, c_lbl, eid)
-    out |= view_drift(store, d_sort, d_feat)
-    out |= view_cases(store, c_name, v_per, tau)
+    out |= view_global(store, sample, n_lbl, c_per, c_lbl, eid, y_mode, dist_mode, bw)
+    out |= view_drift(store, d_sort, d_feat, d_flt, d_page)
+    out |= view_cases(store, c_name, v_per, tau, v_scale, v_ci)
     return out
 
 
 _eid0 = dd.parse_entity_id(card_sel, int(STORE.team5_cards["EntityId"].iloc[0]))
 globals().update(compute_all(
     STORE, _eid0, dd.DEFAULT_TAU, top_n, detail_lvl,
-    map_space, map_color, group_mode, bw_sample, num_feat_lbl, curve_period, cat_feat_lbl,
-    drift_sort, drift_feat_lbl, case_sel, verif_period,
+    map_space, map_color, group_mode,
+    bw_sample, num_feat_lbl, curve_period, cat_feat_lbl,
+    ale_y_mode, ale_dist_mode, kde_bw,
+    drift_sort, drift_feat_lbl, drift_filter, drift_page,
+    case_sel, verif_period, verif_scale, verif_ci_mode,
 ))
 
 
@@ -223,7 +247,7 @@ def _refresh_card_and_similar(state, tau: float):
     )
     vals |= view_card(STORE, eid, tau, int(state.top_n), state.detail_lvl)
     vals |= view_similar(STORE, eid, state.map_space, state.map_color, state.group_mode, tau)
-    vals |= view_global(STORE, state.bw_sample, state.num_feat_lbl, state.curve_period, state.cat_feat_lbl, eid, state.ale_y_mode)
+    vals |= view_global(STORE, state.bw_sample, state.num_feat_lbl, state.curve_period, state.cat_feat_lbl, eid, state.ale_y_mode, state.ale_dist_mode, state.kde_bw)
     vals |= view_cases(STORE, state.case_sel, state.verif_period, tau, state.verif_scale, state.verif_ci_mode)
     _assign(state, vals)
 
@@ -282,12 +306,37 @@ def on_similar_ctl(state, var_name=None, value=None):
 
 
 def on_global_ctl(state, var_name=None, value=None):
-    _assign(state, view_global(STORE, state.bw_sample, state.num_feat_lbl, state.curve_period,
-                               state.cat_feat_lbl, _cur_eid(state), state.ale_y_mode))
+    _assign(state, view_global(
+        STORE, state.bw_sample, state.num_feat_lbl, state.curve_period,
+        state.cat_feat_lbl, _cur_eid(state), state.ale_y_mode, state.ale_dist_mode, state.kde_bw,
+    ))
 
 
 def on_drift_ctl(state, var_name=None, value=None):
-    _assign(state, view_drift(STORE, state.drift_sort, state.drift_feat_lbl))
+    only_high = state.drift_filter.startswith("Сильный")
+    opts = dd.drift_page_options(len(dd.drift_filtered(STORE, state.drift_sort, only_high)))
+    # При смене фильтра или сортировки возвращаемся на 1-ю страницу
+    page_sel = state.drift_page if (var_name == "drift_page" and state.drift_page in opts) else opts[0]
+    with state:
+        state.DRIFT_PAGE_LOV = opts
+        state.drift_page = page_sel
+    _assign(state, view_drift(STORE, state.drift_sort, state.drift_feat_lbl, state.drift_filter, page_sel))
+
+
+def on_drift_prev(state, *args):
+    opts = list(state.DRIFT_PAGE_LOV)
+    idx = opts.index(state.drift_page) if state.drift_page in opts else 0
+    if idx > 0:
+        state.drift_page = opts[idx - 1]
+        on_drift_ctl(state, var_name="drift_page")
+
+
+def on_drift_next(state, *args):
+    opts = list(state.DRIFT_PAGE_LOV)
+    idx = opts.index(state.drift_page) if state.drift_page in opts else 0
+    if idx + 1 < len(opts):
+        state.drift_page = opts[idx + 1]
+        on_drift_ctl(state, var_name="drift_page")
 
 
 def on_case_ctl(state, var_name=None, value=None):
@@ -446,22 +495,27 @@ global_page = "\n\n".join([
     ),
     two(
         card(
-            "Числовой признак: ALE, PDP и индивидуальные ICE-кривые",
-            "fig_ale", 500,
+            "Числовой признак: ALE, PDP, ICE и распределение (гистограмма / KDE)",
+            "fig_ale", 520,
             controls=(
                 "<|{num_feat_lbl}|selector|lov={NUM_LOV}|dropdown|label=Числовой признак (43)|on_change=on_global_ctl|>\n\n"
                 "<|{curve_period}|selector|lov={SAMPLE_LOV}|dropdown|label=Период|on_change=on_global_ctl|>\n\n"
-                "<|{ale_y_mode}|selector|lov={ALE_Y_LOV}|dropdown|label=Ось вероятности (Y)|on_change=on_global_ctl|>"
+                "<|{ale_y_mode}|selector|lov={ALE_Y_LOV}|dropdown|label=Ось вероятности (Y)|on_change=on_global_ctl|>\n\n"
+                "<|{ale_dist_mode}|selector|lov={DIST_MODE_LOV}|dropdown|label=Нижний график|on_change=on_global_ctl|>\n\n"
+                "<|part|class_name=slider-box-sm|\n"
+                "<|Сглаживание KDE (bw): {kde_bw}|text|class_name=slider-label|>\n"
+                "<|{kde_bw}|slider|min=0.2|max=2.5|step=0.1|continuous=False|on_change=on_global_ctl|>\n|>"
             ),
             n_ctl=3,
         ),
         card(
             "Категориальное поле: group-PDP (what-if подстановка уровня целиком)",
-            "fig_gpdp", 460,
+            "fig_gpdp", 520,
             controls="<|{cat_feat_lbl}|selector|lov={CAT_LOV}|dropdown|label=Категориальное поле (12)|on_change=on_global_ctl|>",
             n_ctl=1,
         ),
     ),
+    card("Группы коррелированных числовых признаков (Спирмен |ρ| ≥ 0,50 — почему нужен ALE вместо PDP)", "fig_corr_hm", 560),
 ])
 
 drift_page = "\n\n".join([
@@ -470,9 +524,16 @@ drift_page = "\n\n".join([
     two(
         card(
             "Сдвиг глобальной важности SHAP (Приёмка → Эксплуатация) и индекс дрейфа PSI",
-            "fig_drift_db", 500,
-            controls="<|{drift_sort}|selector|lov={DRIFT_SORT_LOV}|dropdown|label=Сортировка|on_change=on_drift_ctl|>",
-            n_ctl=1,
+            "fig_drift_db", 470,
+            controls=(
+                "<|{drift_filter}|selector|lov={DRIFT_FILTER_LOV}|dropdown|label=Показать поля|on_change=on_drift_ctl|>\n\n"
+                "<|{drift_sort}|selector|lov={DRIFT_SORT_LOV}|dropdown|label=Сортировка|on_change=on_drift_ctl|>\n\n"
+                "<|{drift_page}|selector|lov={DRIFT_PAGE_LOV}|dropdown|label=Страница (по 10 полей)|on_change=on_drift_ctl|>\n\n"
+                "<|layout|columns=1 1|gap=8px|\n"
+                "<|← Пред.|button|on_action=on_drift_prev|class_name=reset|>\n"
+                "<|След. →|button|on_action=on_drift_next|class_name=reset|>\n|>"
+            ),
+            n_ctl=2,
         ),
         card(
             "Профиль распределения признака: Приёмка против Эксплуатации",

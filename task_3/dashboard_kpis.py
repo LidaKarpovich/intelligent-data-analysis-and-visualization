@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 
 import dashboard_data as dd
+from feature_registry import REGISTRY
 
 DASH = "—"
 PSI_HIGH = 0.25
@@ -35,7 +36,7 @@ TILES = {
     "drift": [
         ("d_psi", "Полей с сильным дрейфом"),
         ("d_shap", "Макс. сдвиг важности SHAP"),
-        ("d_enr", "Обогащение «Вендор + Алерт»"),
+        ("d_enr", "Обогащение: заполнены «Вендор» и «Алерт»"),
         ("d_shift", "Сдвиг среднего скора"),
     ],
     "cases": [
@@ -160,12 +161,19 @@ def page_global(store: dd.Store, sample: str, num_feat: str, curve_period: str) 
     overlap = len(top5_shap & top5_abl)
 
     cn = store.curves_num[(store.curves_num["source_column"] == num_feat) & (store.curves_num["period"] == curve_period)]
+    n_pairs = 0
+    if store.corr_numeric is not None:
+        cm = store.corr_numeric
+        n_pairs = int(((cm["feat_a"] < cm["feat_b"]) & (cm["spearman"].abs() >= CORR_WARN)).sum())
     if len(cn):
         max_c = float(cn["max_spearman"].iloc[0])
         partner = str(cn["corr_partner"].iloc[0])
         warn = bool(cn["collinear_warn"].iloc[0])
+        f_ru = _short(REGISTRY[num_feat].label_ru if num_feat in REGISTRY else num_feat, 20)
+        p_ru = _short(REGISTRY[partner].label_ru if partner in REGISTRY else partner, 20)
         corr_v = f"|ρ| = {dd.fmt_num(max_c, 2)}"
-        corr_n = (f"высокая с «{_short(partner, 20)}» — смотрите ALE!" if warn else f"с «{_short(partner, 22)}» — PDP допустим")
+        pairs_txt = f" · пар ≥0,7: {n_pairs}" if n_pairs else ""
+        corr_n = f"«{f_ru}» ↔ «{p_ru}»{pairs_txt}"
     else:
         corr_v, corr_n, warn = DASH, "нет данных", False
 
@@ -190,7 +198,9 @@ def page_drift(store: dd.Store) -> dict:
 
     out = _tile("d_psi", dd.fmt_int(n_high), f"PSI ≥ 0,25 · лидер: {_short(worst_psi['label_ru'], 22)} ({dd.fmt_num(worst_psi['psi'], 2)})", alert=n_high > 0)
     out |= _tile("d_shap", _short(worst_sh["label_ru"], 26), f"Δmean|SHAP| {dd.fmt_signed(worst_sh['delta_abs_shap'], 3)}")
-    out |= _tile("d_enr", dd.fmt_pct(enr_o, 0), f"на приёмке {dd.fmt_pct(enr_v, 0)} (обвал обогащения)", alert=(enr_o < enr_v * 0.75))
+    out |= _tile("d_enr", dd.fmt_pct(enr_o, 0),
+                 f"оба поля не пусты · на приёмке {dd.fmt_pct(enr_v, 0)}",
+                 alert=(enr_o < enr_v * 0.75))
     out |= _tile("d_shift", dd.fmt_signed(ms_o - ms_v, 2), f"приёмка {dd.fmt_num(ms_v, 2)} → прод {dd.fmt_num(ms_o, 2)} (log-odds)")
     return out
 

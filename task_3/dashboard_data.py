@@ -169,6 +169,8 @@ class Store:
     shap_pool_mat: np.ndarray
     shap_pool_meta: pd.DataFrame
     points_tau: pd.DataFrame | None = None
+    corr_numeric: pd.DataFrame | None = None
+    numeric_dist: pd.DataFrame | None = None
 
 
 def load(agg_dir: Path = AGG_DIR) -> Store:
@@ -194,8 +196,14 @@ def load(agg_dir: Path = AGG_DIR) -> Store:
     pool_mat = pool[FEATURE_ORDER_73].to_numpy(dtype=np.float64)
     pool_meta = pool[["EntityId", "y_true", "proba", "outcome", "source"]].copy()
     
-    pts_path = agg_dir / "map_points_tau.parquet"
-    points_tau = pd.read_parquet(pts_path) if pts_path.exists() else None
+    read_opt = lambda name: pd.read_parquet(agg_dir / f"{name}.parquet") if (agg_dir / f"{name}.parquet").exists() else None
+    points_tau = read_opt("map_points_tau")
+    corr_numeric = read_opt("corr_numeric")
+    numeric_dist = read_opt("numeric_dist_sample")
+    hex_shap = read("map_hex_shap")
+    if points_tau is None or "hq" not in hex_shap.columns:
+        print("[WARN] Живой пересчёт Hexbin при смене τ неактивен: перезапустите prepare.py "
+              f"(points_tau={'ok' if points_tau is not None else 'missing'}, hq_in_hex={'hq' in hex_shap.columns})")
 
     return Store(
         meta=meta,
@@ -221,6 +229,8 @@ def load(agg_dir: Path = AGG_DIR) -> Store:
         shap_pool_mat=pool_mat,
         shap_pool_meta=pool_meta,
         points_tau=points_tau,
+        corr_numeric=corr_numeric,
+        numeric_dist=numeric_dist,
     )
 
 
@@ -256,6 +266,43 @@ def hex_at_threshold(store: Store, space_key: str, tau: float) -> tuple[pd.DataF
     merged["pred_rate"] = merged["pred_rate_dyn"].fillna(merged["pred_rate"])
     merged["err_rate"] = merged["err_rate_dyn"].fillna(merged["err_rate"])
     return merged.drop(columns=["pred_rate_dyn", "err_rate_dyn"]), True
+
+
+# ---------------------------------------------------------------- хелперы для пагинации дрейфа
+DRIFT_PAGE_SIZE = 10
+
+
+def drift_filtered(store: Store, sort_by: str, only_high_psi: bool) -> pd.DataFrame:
+    ds = store.drift_summary.copy()
+    if only_high_psi:
+        ds = ds[ds["psi"] >= 0.25].copy()
+    if sort_by == "По PSI":
+        ds = ds.sort_values("psi", ascending=False)
+    elif sort_by == "По росту пропусков":
+        ds = ds.sort_values("delta_null", ascending=False)
+    else:
+        ds["abs_d"] = ds["delta_abs_shap"].abs()
+        ds = ds.sort_values("abs_d", ascending=False)
+    return ds.reset_index(drop=True)
+
+
+def drift_page_options(total_rows: int, page_size: int = DRIFT_PAGE_SIZE) -> list[str]:
+    if total_rows <= 0:
+        return ["Стр. 1 из 1 (0 полей)"]
+    n_pages = int(np.ceil(total_rows / page_size))
+    opts = []
+    for p in range(n_pages):
+        lo = p * page_size + 1
+        hi = min((p + 1) * page_size, total_rows)
+        opts.append(f"Стр. {p + 1} из {n_pages} ({lo}–{hi} из {total_rows})")
+    return opts
+
+
+def parse_page_idx(label: str) -> int:
+    try:
+        return max(0, int(str(label).split()[1]) - 1)
+    except (IndexError, ValueError):
+        return 0
 
 
 # ---------------------------------------------------------------- селекторы и срезы
