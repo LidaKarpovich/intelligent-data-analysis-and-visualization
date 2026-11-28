@@ -50,7 +50,7 @@ GROUP_LOV = ["40 ближайших по SHAP", "Тот же исход (пра�
 SAMPLE_LOV = ["Эксплуатация", "Приёмка"]
 DRIFT_SORT_LOV = ["По сдвигу |SHAP|", "По PSI", "По росту пропусков"]
 CASE_LOV = list(dd.CURATED_CASES.keys())
-VERIF_PER_LOV = ["Эксплуатация", "Окно обучения"]
+VERIF_PER_LOV = ["Эксплуатация", "Обучение"]
 
 NUM_LABEL_TO_COL = {f"{REGISTRY[c].label_ru} ({c})": c for c in NUMERIC_FEATURES_43}
 NUM_LOV = list(NUM_LABEL_TO_COL.keys())

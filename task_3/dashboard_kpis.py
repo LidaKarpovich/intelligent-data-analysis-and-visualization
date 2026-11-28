@@ -13,6 +13,10 @@ DASH = "—"
 PSI_HIGH = 0.25
 CORR_WARN = 0.70
 
+PSI_HIGH = 0.25          # порог сильного дрейфа для отдельного поля
+PSI_SHARE_ALERT = 0.20   # сигнал плитки: сильный дрейф у ≥ 20 % полей (≥ 15 из 73)
+PSI_LEADER_ALERT = 1.00  # или экстремальный сдвиг лидера (PSI ≥ 1,0)
+
 TILES = {
     "card": [
         ("c_true", "Факт SOC (y_true)"),
@@ -187,8 +191,11 @@ def page_global(store: dd.Store, sample: str, num_feat: str, curve_period: str) 
 # ---------------------------------------------------------------- 4. Дрейф
 def page_drift(store: dd.Store) -> dict:
     ds = store.drift_summary
+    n_total = len(ds)
     n_high = int((ds["psi"] >= PSI_HIGH).sum())
+    share_high = n_high / max(n_total, 1)
     worst_psi = ds.sort_values("psi", ascending=False).iloc[0]
+    psi_alert = (share_high >= PSI_SHARE_ALERT) or (float(worst_psi["psi"]) >= PSI_LEADER_ALERT)
     worst_sh = ds.reindex(ds["delta_abs_shap"].abs().sort_values(ascending=False).index).iloc[0]
 
     enr_v = store.meta["enrichment"]["val"]
@@ -196,7 +203,12 @@ def page_drift(store: dd.Store) -> dict:
     ms_v = store.meta["mean_raw_score"]["val"]
     ms_o = store.meta["mean_raw_score"]["oper"]
 
-    out = _tile("d_psi", dd.fmt_int(n_high), f"PSI ≥ 0,25 · лидер: {_short(worst_psi['label_ru'], 22)} ({dd.fmt_num(worst_psi['psi'], 2)})", alert=n_high > 0)
+    out = _tile(
+        "d_psi",
+        f"{dd.fmt_int(n_high)} из {n_total}",
+        f"{dd.fmt_pct(share_high, 0)} полей с PSI ≥ 0,25 · лидер: {_short(worst_psi['label_ru'], 18)} ({dd.fmt_num(worst_psi['psi'], 2)})",
+        alert=psi_alert,
+    )
     out |= _tile("d_shap", _short(worst_sh["label_ru"], 26), f"Δmean|SHAP| {dd.fmt_signed(worst_sh['delta_abs_shap'], 3)}")
     out |= _tile("d_enr", dd.fmt_pct(enr_o, 0),
                  f"оба поля не пусты · на приёмке {dd.fmt_pct(enr_v, 0)}",

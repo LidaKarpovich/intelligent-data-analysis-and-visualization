@@ -793,7 +793,7 @@ def build_verification_stats(
             card_v = prepared_t5.iloc[t_pos][col] if col in prepared_t5.columns else None
 
             for period_name, p_mask in [
-                ("Окно обучения", lab_mask & (parts_all != "Эксплуатация")),
+                ("Обучение", lab_mask & (parts_all == "Обучение")),
                 ("Эксплуатация", lab_mask & (parts_all == "Эксплуатация")),
             ]:
                 p0 = float(y_all[p_mask].mean()) if p_mask.any() else np.nan
@@ -827,21 +827,27 @@ def build_verification_stats(
                     s_norm = ser.map(lambda v: "— (пропуск)" if pd.isna(v) or str(v).strip() in ("", "None") else str(v))
                     m = (s_norm == cv_norm).to_numpy()
                     slice_desc = f"= {clean_display_value(card_v, 36)}"
-                else:
-                    # Для текста / PCA / даты: проверяем заполненность (а для точного совпадения — если n >= 10)
-                    cv_null = pd.isna(card_v) or str(card_v).strip() in ("", "None")
-                    s_null = ser.map(lambda v: pd.isna(v) or str(v).strip() in ("", "None")).to_numpy()
-                    if cv_null:
-                        m = s_null
+                elif meta.last_step == "DateTimeFeatures":
+                    # Модель видит из «Создан» час/день недели/выходной, а не точный timestamp
+                    card_ts = pd.to_datetime(card_v, errors="coerce", utc=True)
+                    ser_ts = pd.to_datetime(ser, errors="coerce", utc=True)
+                    if pd.isna(card_ts):
+                        m = ser_ts.isna().to_numpy()
                         slice_desc = "пропуск (пусто)"
                     else:
-                        exact = (ser.astype(str) == str(card_v)).to_numpy()
-                        if exact.sum() >= 10:
-                            m = exact
-                            slice_desc = f"= {clean_display_value(card_v, 36)}"
-                        else:
-                            m = ~s_null
-                            slice_desc = "поле заполнено"
+                        hr = int(card_ts.hour)
+                        m = (ser_ts.dt.hour == hr).to_numpy()
+                        slice_desc = f"час = {hr:02d} UTC"
+                else:
+                    # Для текста (TF-IDF) и сетей/хостов (PCA): только пропуск или точное значение.
+                    # Если точных совпадений < 10 — не подменяем на «поле заполнено», честно оставляем «Мало данных».
+                    cv_null = pd.isna(card_v) or str(card_v).strip() in ("", "None")
+                    if cv_null:
+                        m = ser.map(lambda v: pd.isna(v) or str(v).strip() in ("", "None")).to_numpy()
+                        slice_desc = "пропуск (пусто)"
+                    else:
+                        m = (ser.astype(str) == str(card_v)).to_numpy()
+                        slice_desc = f"= {clean_display_value(card_v, 36)}"
 
                 n = int(m.sum())
                 k = int(yv[m].sum()) if n > 0 else 0
